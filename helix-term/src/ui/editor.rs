@@ -86,10 +86,22 @@ impl EditorView {
         surface: &mut Surface,
         is_focused: bool,
     ) {
-        let inner = view.inner_area(doc);
+        let config = editor.config();
+        // Adjust inner area based on statusline position
+        let inner = match config.statusline.position {
+            helix_view::editor::StatusLinePosition::Top => {
+                // Statusline is at top, so clip top instead of bottom
+                view.area
+                    .clip_left(view.gutter_offset(doc))
+                    .clip_top(1) // -1 for statusline at top
+            }
+            helix_view::editor::StatusLinePosition::Bottom => {
+                // Use default inner_area (clips bottom for statusline)
+                view.inner_area(doc)
+            }
+        };
         let area = view.area;
         let theme = &editor.theme;
-        let config = editor.config();
         let loader = editor.syn_loader.load();
 
         let view_offset = doc.view_offset(view.id);
@@ -98,7 +110,7 @@ impl EditorView {
         let mut decorations = DecorationManager::default();
 
         if is_focused && config.cursorline {
-            decorations.add_decoration(Self::cursorline(doc, view, theme));
+            decorations.add_decoration(Self::cursorline(doc, view, theme, inner));
         }
 
         if is_focused && config.cursorcolumn {
@@ -268,10 +280,16 @@ impl EditorView {
             Self::render_diagnostics(doc, view, inner, surface, theme);
         }
 
-        let statusline_area = view
-            .area
-            .clip_top(view.area.height.saturating_sub(1))
-            .clip_bottom(1); // -1 from bottom to remove commandline
+        let statusline_area = match config.statusline.position {
+            helix_view::editor::StatusLinePosition::Top => {
+                view.area.with_height(1)
+            }
+            helix_view::editor::StatusLinePosition::Bottom => {
+                view.area
+                    .clip_top(view.area.height.saturating_sub(1))
+                    .clip_bottom(1) // -1 from bottom to remove commandline
+            }
+        };
 
         let mut context =
             statusline::RenderContext::new(editor, doc, view, is_focused, &self.spinners);
@@ -844,7 +862,7 @@ impl EditorView {
     }
 
     /// Apply the highlighting on the lines where a cursor is active
-    pub fn cursorline(doc: &Document, view: &View, theme: &Theme) -> impl Decoration {
+    pub fn cursorline(doc: &Document, view: &View, theme: &Theme, viewport: Rect) -> impl Decoration {
         let text = doc.text().slice(..);
         // TODO only highlight the visual line that contains the cursor instead of the full visual line
         let primary_line = doc.selection(view.id).primary().cursor_line(text);
@@ -863,7 +881,6 @@ impl EditorView {
 
         let primary_style = theme.get("ui.cursorline.primary");
         let secondary_style = theme.get("ui.cursorline.secondary");
-        let viewport = view.area;
 
         move |renderer: &mut TextRenderer, pos: LinePos| {
             let area = Rect::new(viewport.x, pos.visual_line, viewport.width, 1);
@@ -916,9 +933,9 @@ impl EditorView {
             {
                 let area = Rect::new(
                     inner_area.x + (col - view_offset.horizontal_offset) as u16,
-                    view.area.y,
+                    viewport.y,
                     1,
-                    view.area.height,
+                    viewport.height,
                 );
                 if is_primary {
                     surface.set_style(area, primary_style)
@@ -1207,11 +1224,35 @@ impl EditorView {
         } = *event;
 
         let pos_and_view = |editor: &Editor, row, column, ignore_virtual_text| {
+            let config = editor.config();
             editor.tree.views().find_map(|(view, _focus)| {
-                view.pos_at_screen_coords(
-                    &editor.documents[&view.doc],
-                    row,
-                    column,
+                let doc = &editor.documents[&view.doc];
+
+                // Calculate the correct inner area based on statusline position
+                let inner = match config.statusline.position {
+                    helix_view::editor::StatusLinePosition::Top => {
+                        view.area.clip_left(view.gutter_offset(doc)).clip_top(1)
+                    }
+                    helix_view::editor::StatusLinePosition::Bottom => {
+                        view.inner_area(doc)
+                    }
+                };
+
+                // Check if the click is within the inner area
+                if row < inner.top() || row >= inner.bottom() {
+                    return None;
+                }
+                if column < inner.left() || column > inner.right() {
+                    return None;
+                }
+
+                // Use text_pos_at_visual_coords directly with adjusted coordinates
+                view.text_pos_at_visual_coords(
+                    doc,
+                    row - inner.y,
+                    column - inner.x,
+                    doc.text_format(view.inner_width(doc), None),
+                    &view.text_annotations(doc, None),
                     ignore_virtual_text,
                 )
                 .map(|pos| (pos, view.id))
@@ -1219,9 +1260,37 @@ impl EditorView {
         };
 
         let gutter_coords_and_view = |editor: &Editor, row, column| {
+            let config = editor.config();
             editor.tree.views().find_map(|(view, _focus)| {
-                view.gutter_coords_at_screen_coords(row, column)
-                    .map(|coords| (coords, view.id))
+                let _doc = &editor.documents[&view.doc];
+
+                // Calculate the correct area based on statusline position
+                let area = match config.statusline.position {
+                    helix_view::editor::StatusLinePosition::Top => {
+                        // When statusline is at top, the view content starts 1 row below
+                        view.area.clip_top(1)
+                    }
+                    helix_view::editor::StatusLinePosition::Bottom => {
+                        // When statusline is at bottom, use the default area
+                        view.area.clip_bottom(1)
+                    }
+                };
+
+                // Check if coordinates are within the area
+                if row < area.top() || row >= area.bottom() {
+                    return None;
+                }
+                if column < area.left() || column > area.right() {
+                    return None;
+                }
+
+                Some((
+                    helix_core::Position::new(
+                        (row - area.top()) as usize,
+                        (column - area.left()) as usize,
+                    ),
+                    view.id,
+                ))
             })
         };
 

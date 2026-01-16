@@ -603,6 +603,14 @@ pub struct StatusLineConfig {
     pub mode: ModeConfig,
     pub diagnostics: Vec<Severity>,
     pub workspace_diagnostics: Vec<Severity>,
+    pub position: StatusLinePosition,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusLinePosition {
+    Top,
+    Bottom,
 }
 
 impl Default for StatusLineConfig {
@@ -628,7 +636,14 @@ impl Default for StatusLineConfig {
             mode: ModeConfig::default(),
             diagnostics: vec![Severity::Warning, Severity::Error],
             workspace_diagnostics: vec![Severity::Warning, Severity::Error],
+            position: StatusLinePosition::Bottom,
         }
+    }
+}
+
+impl Default for StatusLinePosition {
+    fn default() -> Self {
+        Self::Bottom
     }
 }
 
@@ -2202,7 +2217,19 @@ impl Editor {
         let config = self.config();
         let (view, doc) = current_ref!(self);
         if let Some(mut pos) = self.cursor_cache.get(view, doc) {
-            let inner = view.inner_area(doc);
+            // Calculate the correct inner area based on statusline position
+            let inner = match config.statusline.position {
+                StatusLinePosition::Top => {
+                    // Statusline is at top, so clip top instead of bottom
+                    view.area
+                        .clip_left(view.gutter_offset(doc))
+                        .clip_top(1) // -1 for statusline at top
+                }
+                StatusLinePosition::Bottom => {
+                    // Use default inner_area (clips bottom for statusline)
+                    view.inner_area(doc)
+                }
+            };
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;
             let cursorkind = config.cursor_shape.from_mode(self.mode);
