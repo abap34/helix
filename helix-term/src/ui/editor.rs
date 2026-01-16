@@ -8,7 +8,9 @@ use crate::{
     ui::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
-        text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
+        text_decorations::{
+            self, Decoration, DecorationManager, InlineCompletionDecoration, InlineDiagnostics,
+        },
         Completion, ProgressSpinners,
     },
 };
@@ -24,9 +26,10 @@ use helix_core::{
 };
 use helix_view::{
     annotations::diagnostics::DiagnosticFilter,
-    document::{Mode, SCRATCH_BUFFER_NAME},
+    document::{Mode, DEFAULT_LANGUAGE_NAME, SCRATCH_BUFFER_NAME},
     editor::{CompleteAction, CursorShapeConfig},
     graphics::{Color, CursorKind, Modifier, Rect, Style},
+    icons::ICONS,
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
@@ -83,10 +86,22 @@ impl EditorView {
         surface: &mut Surface,
         is_focused: bool,
     ) {
-        let inner = view.inner_area(doc);
+        let config = editor.config();
+        // Adjust inner area based on statusline position
+        let inner = match config.statusline.position {
+            helix_view::editor::StatusLinePosition::Top => {
+                // Statusline is at top, so clip top instead of bottom
+                view.area
+                    .clip_left(view.gutter_offset(doc))
+                    .clip_top(1) // -1 for statusline at top
+            }
+            helix_view::editor::StatusLinePosition::Bottom => {
+                // Use default inner_area (clips bottom for statusline)
+                view.inner_area(doc)
+            }
+        };
         let area = view.area;
         let theme = &editor.theme;
-        let config = editor.config();
         let loader = editor.syn_loader.load();
 
         let view_offset = doc.view_offset(view.id);
@@ -95,7 +110,7 @@ impl EditorView {
         let mut decorations = DecorationManager::default();
 
         if is_focused && config.cursorline {
-            decorations.add_decoration(Self::cursorline(doc, view, theme));
+            decorations.add_decoration(Self::cursorline(doc, view, theme, inner));
         }
 
         if is_focused && config.cursorcolumn {
@@ -183,6 +198,45 @@ impl EditorView {
                 primary_cursor,
             });
         }
+        // Add inline completion decoration (renders EOL ghost text, overflow, and additional lines)
+        if let Some(completion) = doc.inline_completions.current() {
+            let has_eol = completion.eol_ghost_text.is_some();
+            let has_overflow = completion.overflow_text.is_some();
+            let has_additional = !completion.additional_lines.is_empty();
+            if has_eol || has_overflow || has_additional {
+                let cursor_line = doc.text().char_to_line(primary_cursor);
+                let style = theme.get("ui.virtual.inline-completion");
+
+                // Get cursor style for EOL first char overlay effect (mode-dependent)
+                let cursor_style = match editor.mode() {
+                    Mode::Insert => theme
+                        .try_get("ui.cursor.primary.insert")
+                        .or_else(|| theme.try_get("ui.cursor.insert"))
+                        .or_else(|| theme.try_get("ui.cursor.primary"))
+                        .unwrap_or_else(|| theme.get("ui.cursor")),
+                    Mode::Select => theme
+                        .try_get("ui.cursor.primary.select")
+                        .or_else(|| theme.try_get("ui.cursor.select"))
+                        .or_else(|| theme.try_get("ui.cursor.primary"))
+                        .unwrap_or_else(|| theme.get("ui.cursor")),
+                    Mode::Normal => theme
+                        .try_get("ui.cursor.primary.normal")
+                        .or_else(|| theme.try_get("ui.cursor.normal"))
+                        .or_else(|| theme.try_get("ui.cursor.primary"))
+                        .unwrap_or_else(|| theme.get("ui.cursor")),
+                };
+
+                decorations.add_decoration(InlineCompletionDecoration::new(
+                    cursor_line,
+                    completion.eol_ghost_text.as_deref(),
+                    completion.overflow_text.as_deref(),
+                    &completion.additional_lines,
+                    style,
+                    Some(cursor_style),
+                ));
+            }
+        }
+
         let width = view.inner_width(doc);
         let config = doc.config.load();
         let enable_cursor_line = view
@@ -226,10 +280,16 @@ impl EditorView {
             Self::render_diagnostics(doc, view, inner, surface, theme);
         }
 
-        let statusline_area = view
-            .area
-            .clip_top(view.area.height.saturating_sub(1))
-            .clip_bottom(1); // -1 from bottom to remove commandline
+        let statusline_area = match config.statusline.position {
+            helix_view::editor::StatusLinePosition::Top => {
+                view.area.with_height(1)
+            }
+            helix_view::editor::StatusLinePosition::Bottom => {
+                view.area
+                    .clip_top(view.area.height.saturating_sub(1))
+                    .clip_bottom(1) // -1 from bottom to remove commandline
+            }
+        };
 
         let mut context =
             statusline::RenderContext::new(editor, doc, view, is_focused, &self.spinners);
@@ -246,7 +306,8 @@ impl EditorView {
         theme: &Theme,
     ) {
         let editor_rulers = &editor.config().rulers;
-        let ruler_theme = theme
+
+        let style = theme
             .try_get("ui.virtual.ruler")
             .unwrap_or_else(|| Style::default().bg(Color::Red));
 
@@ -264,7 +325,12 @@ impl EditorView {
             .filter_map(|ruler| ruler.checked_sub(1 + view_offset.horizontal_offset as u16))
             .filter(|ruler| ruler < &viewport.width)
             .map(|ruler| viewport.clip_left(ruler).with_width(1))
-            .for_each(|area| surface.set_style(area, ruler_theme))
+            .for_each(|area| {
+                let icons = ICONS.load();
+                for y in area.y..area.height {
+                    surface.set_string(area.x, y, icons.ui().r#virtual().ruler(), style);
+                }
+            });
     }
 
     fn viewport_byte_range(
@@ -630,7 +696,30 @@ impl EditorView {
                 bufferline_inactive
             };
 
-            let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
+            let icons = ICONS.load();
+
+            let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
+
+            if let Some(icon) = icons
+                .fs()
+                .from_optional_path_or_lang(doc.path().map(|path| path.as_path()), lang)
+            {
+                let used_width = viewport.x.saturating_sub(x);
+                let rem_width = surface.area.width.saturating_sub(used_width);
+
+                let style = icon.color().map_or(style, |color| style.fg(color));
+
+                x = surface
+                    .set_stringn(x, viewport.y, format!(" {icon}"), rem_width as usize, style)
+                    .0;
+
+                if x >= surface.area.right() {
+                    break;
+                }
+            }
+
+            let text = format!(" {} {}", fname, if doc.is_modified() { "[+] " } else { "" });
+
             let used_width = viewport.x.saturating_sub(x);
             let rem_width = surface.area.width.saturating_sub(used_width);
 
@@ -773,7 +862,7 @@ impl EditorView {
     }
 
     /// Apply the highlighting on the lines where a cursor is active
-    pub fn cursorline(doc: &Document, view: &View, theme: &Theme) -> impl Decoration {
+    pub fn cursorline(doc: &Document, view: &View, theme: &Theme, viewport: Rect) -> impl Decoration {
         let text = doc.text().slice(..);
         // TODO only highlight the visual line that contains the cursor instead of the full visual line
         let primary_line = doc.selection(view.id).primary().cursor_line(text);
@@ -792,7 +881,6 @@ impl EditorView {
 
         let primary_style = theme.get("ui.cursorline.primary");
         let secondary_style = theme.get("ui.cursorline.secondary");
-        let viewport = view.area;
 
         move |renderer: &mut TextRenderer, pos: LinePos| {
             let area = Rect::new(viewport.x, pos.visual_line, viewport.width, 1);
@@ -845,9 +933,9 @@ impl EditorView {
             {
                 let area = Rect::new(
                     inner_area.x + (col - view_offset.horizontal_offset) as u16,
-                    view.area.y,
+                    viewport.y,
                     1,
-                    view.area.height,
+                    viewport.height,
                 );
                 if is_primary {
                     surface.set_style(area, primary_style)
@@ -1136,11 +1224,35 @@ impl EditorView {
         } = *event;
 
         let pos_and_view = |editor: &Editor, row, column, ignore_virtual_text| {
+            let config = editor.config();
             editor.tree.views().find_map(|(view, _focus)| {
-                view.pos_at_screen_coords(
-                    &editor.documents[&view.doc],
-                    row,
-                    column,
+                let doc = &editor.documents[&view.doc];
+
+                // Calculate the correct inner area based on statusline position
+                let inner = match config.statusline.position {
+                    helix_view::editor::StatusLinePosition::Top => {
+                        view.area.clip_left(view.gutter_offset(doc)).clip_top(1)
+                    }
+                    helix_view::editor::StatusLinePosition::Bottom => {
+                        view.inner_area(doc)
+                    }
+                };
+
+                // Check if the click is within the inner area
+                if row < inner.top() || row >= inner.bottom() {
+                    return None;
+                }
+                if column < inner.left() || column > inner.right() {
+                    return None;
+                }
+
+                // Use text_pos_at_visual_coords directly with adjusted coordinates
+                view.text_pos_at_visual_coords(
+                    doc,
+                    row - inner.y,
+                    column - inner.x,
+                    doc.text_format(view.inner_width(doc), None),
+                    &view.text_annotations(doc, None),
                     ignore_virtual_text,
                 )
                 .map(|pos| (pos, view.id))
@@ -1148,9 +1260,37 @@ impl EditorView {
         };
 
         let gutter_coords_and_view = |editor: &Editor, row, column| {
+            let config = editor.config();
             editor.tree.views().find_map(|(view, _focus)| {
-                view.gutter_coords_at_screen_coords(row, column)
-                    .map(|coords| (coords, view.id))
+                let _doc = &editor.documents[&view.doc];
+
+                // Calculate the correct area based on statusline position
+                let area = match config.statusline.position {
+                    helix_view::editor::StatusLinePosition::Top => {
+                        // When statusline is at top, the view content starts 1 row below
+                        view.area.clip_top(1)
+                    }
+                    helix_view::editor::StatusLinePosition::Bottom => {
+                        // When statusline is at bottom, use the default area
+                        view.area.clip_bottom(1)
+                    }
+                };
+
+                // Check if coordinates are within the area
+                if row < area.top() || row >= area.bottom() {
+                    return None;
+                }
+                if column < area.left() || column > area.right() {
+                    return None;
+                }
+
+                Some((
+                    helix_core::Position::new(
+                        (row - area.top()) as usize,
+                        (column - area.left()) as usize,
+                    ),
+                    view.id,
+                ))
             })
         };
 

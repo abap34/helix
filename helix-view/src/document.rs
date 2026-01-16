@@ -43,6 +43,7 @@ use helix_core::{
     ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
+use crate::icons::{Icons, ICONS};
 use crate::{
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
@@ -110,6 +111,71 @@ impl Serialize for Mode {
         serializer.collect_str(self)
     }
 }
+
+/// Inline completion data for ghost text display and acceptance.
+pub struct InlineCompletion {
+    /// Ghost text to display/insert (typed prefix already removed).
+    pub ghost_text: String,
+    /// Range to replace: `from()` = prefix start, `to()` = replacement end.
+    pub replace_range: Range,
+    /// Char index where completion starts (cursor position when received).
+    pub cursor_char_idx: usize,
+    /// Overlays for mid-line ghost text (replace chars in-place, no cursor shift).
+    pub overlays: Vec<Overlay>,
+    /// Overflow text for mid-line (preview chars beyond original line length).
+    pub overflow_text: Option<String>,
+    /// First line ghost text when at EOL (rendered via Decoration, not annotation).
+    pub eol_ghost_text: Option<String>,
+    /// Additional lines for multi-line ghost text.
+    pub additional_lines: Vec<String>,
+}
+
+/// List of inline completions with cycling support.
+#[derive(Default)]
+pub struct InlineCompletions {
+    items: Vec<InlineCompletion>,
+    index: usize,
+}
+
+impl InlineCompletions {
+    pub fn push(&mut self, item: InlineCompletion) {
+        self.items.push(item);
+    }
+
+    pub fn current(&self) -> Option<&InlineCompletion> {
+        self.items.get(self.index)
+    }
+
+    pub fn cycle(&mut self, direction: helix_core::movement::Direction) {
+        if !self.items.is_empty() {
+            let len = self.items.len();
+            self.index = match direction {
+                helix_core::movement::Direction::Forward => (self.index + 1) % len,
+                helix_core::movement::Direction::Backward => (self.index + len - 1) % len,
+            };
+        }
+    }
+
+    pub fn take_and_clear(&mut self) -> Option<InlineCompletion> {
+        if self.items.is_empty() {
+            return None;
+        }
+        let item = self.items.swap_remove(self.index);
+        self.items.clear();
+        self.index = 0;
+        Some(item)
+    }
+
+    /// Rebuild the overlay cache from the current completion.
+    pub fn rebuild_overlays(&self, overlays: &mut Vec<Overlay>) {
+        overlays.clear();
+
+        if let Some(completion) = self.current() {
+            overlays.extend(completion.overlays.iter().cloned());
+        }
+    }
+}
+
 /// A snapshot of the text of a document that we want to write out to disk
 #[derive(Debug, Clone)]
 pub struct DocumentSavedEvent {
@@ -153,6 +219,11 @@ pub struct Document {
     /// Set to `true` when the document is updated, reset to `false` on the next inlay hints
     /// update from the LSP
     pub inlay_hints_oudated: bool,
+
+    /// Inline completions (ghost text) for the document.
+    pub inline_completions: InlineCompletions,
+    /// Cached overlays for ghost text (replace chars in-place, no cursor shift).
+    pub inline_completion_overlays: Vec<Overlay>,
 
     path: Option<PathBuf>,
     relative_path: OnceCell<Option<PathBuf>>,
@@ -705,6 +776,8 @@ impl Document {
             selections: HashMap::default(),
             inlay_hints: HashMap::default(),
             inlay_hints_oudated: false,
+            inline_completions: InlineCompletions::default(),
+            inline_completion_overlays: Vec::new(),
             view_data: Default::default(),
             indent_style: DEFAULT_INDENT,
             editor_config: EditorConfig::default(),
@@ -2260,8 +2333,10 @@ impl Document {
             .unwrap_or(40);
         let wrap_indicator = language_soft_wrap
             .and_then(|soft_wrap| soft_wrap.wrap_indicator.clone())
-            .or_else(|| config.soft_wrap.wrap_indicator.clone())
-            .unwrap_or_else(|| "↪ ".into());
+            .unwrap_or_else(|| {
+                let icons: arc_swap::access::DynGuard<Icons> = ICONS.load();
+                icons.ui().r#virtual().wrap().to_string()
+            });
         let tab_width = self.tab_width() as u16;
         TextFormat {
             soft_wrap: enable_soft_wrap && viewport_width > 10,

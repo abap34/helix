@@ -14,7 +14,7 @@ use helix_vcs::{FileChange, Hunk};
 pub use lsp::*;
 pub use syntax::*;
 use tui::{
-    text::{Span, Spans},
+    text::{Span, Spans, ToSpan},
     widgets::Cell,
 };
 pub use typed::*;
@@ -48,6 +48,7 @@ use helix_view::{
     document::{FormatterError, Mode, SCRATCH_BUFFER_NAME},
     editor::Action,
     expansion,
+    icons::{Icons, ICONS},
     info::Info,
     input::KeyEvent,
     keyboard::KeyCode,
@@ -58,7 +59,7 @@ use helix_view::{
 };
 
 use anyhow::{anyhow, bail, ensure, Context as _};
-use arc_swap::access::DynAccess;
+use arc_swap::access::{DynAccess, DynGuard};
 use insert::*;
 use movement::Movement;
 
@@ -516,6 +517,11 @@ impl MappableCommand {
         keep_primary_selection, "Keep primary selection",
         remove_primary_selection, "Remove primary selection",
         completion, "Invoke completion popup",
+        inline_completion_accept, "Accept inline completion",
+        inline_completion_dismiss, "Dismiss inline completion",
+        inline_completion_next, "Cycle to next inline completion",
+        inline_completion_prev, "Cycle to previous inline completion",
+        inline_completion_trigger, "Trigger inline completion",
         hover, "Show docs for item under cursor",
         toggle_comments, "Comment/uncomment selections",
         toggle_line_comments, "Line comment/uncomment selections",
@@ -2501,12 +2507,22 @@ fn global_search(cx: &mut Context) {
                 .expect("global search paths are normalized (can't end in `..`)")
                 .to_string_lossy();
 
-            Cell::from(Spans::from(vec![
+            let mut spans = Vec::with_capacity(5);
+
+            let icons: DynGuard<Icons> = ICONS.load();
+
+            if let Some(icon) = icons.fs().from_path(&path) {
+                spans.push(icon.to_span_with(|icon| format!("{icon} ")));
+            }
+
+            spans.extend_from_slice(&[
                 Span::styled(directories, config.directory_style),
                 Span::raw(filename),
                 Span::styled(":", config.colon_style),
                 Span::styled((item.line_num + 1).to_string(), config.number_style),
-            ]))
+            ]);
+
+            Cell::from(Spans::from(spans))
         }),
         PickerColumn::hidden("contents"),
     ];
@@ -3204,11 +3220,23 @@ fn buffer_picker(cx: &mut Context) {
                 .path
                 .as_deref()
                 .map(helix_stdx::path::get_relative_path);
-            path.as_deref()
+
+            let name = path
+                .as_deref()
                 .and_then(Path::to_str)
-                .unwrap_or(SCRATCH_BUFFER_NAME)
-                .to_string()
-                .into()
+                .unwrap_or(SCRATCH_BUFFER_NAME);
+
+            let icons: DynGuard<Icons> = ICONS.load();
+
+            let mut spans = Vec::with_capacity(2);
+
+            if let Some(icon) = icons.fs().from_optional_path(path.as_deref()) {
+                spans.push(icon.to_span_with(|icon| format!("{icon} ")));
+            }
+
+            spans.push(Span::raw(name.to_string()));
+
+            Cell::from(Spans::from(spans))
         }),
     ];
 
@@ -3282,11 +3310,23 @@ fn jumplist_picker(cx: &mut Context) {
                 .path
                 .as_deref()
                 .map(helix_stdx::path::get_relative_path);
-            path.as_deref()
+
+            let name = path
+                .as_deref()
                 .and_then(Path::to_str)
-                .unwrap_or(SCRATCH_BUFFER_NAME)
-                .to_string()
-                .into()
+                .unwrap_or(SCRATCH_BUFFER_NAME);
+
+            let icons: DynGuard<Icons> = ICONS.load();
+
+            let mut spans = Vec::with_capacity(2);
+
+            if let Some(icon) = icons.fs().from_optional_path(path.as_deref()) {
+                spans.push(icon.to_span_with(|icon| format!("{icon} ")));
+            }
+
+            spans.push(Span::raw(name.to_string()));
+
+            Cell::from(Spans::from(spans))
         }),
         ui::PickerColumn::new("flags", |item: &JumpMeta, _| {
             let mut flags = Vec::new();
@@ -3356,12 +3396,44 @@ fn changed_file_picker(cx: &mut Context) {
 
     let columns = [
         PickerColumn::new("change", |change: &FileChange, data: &FileChangeData| {
+            let icons: DynGuard<Icons> = ICONS.load();
+
             match change {
-                FileChange::Untracked { .. } => Span::styled("+ untracked", data.style_untracked),
-                FileChange::Modified { .. } => Span::styled("~ modified", data.style_modified),
-                FileChange::Conflict { .. } => Span::styled("x conflict", data.style_conflict),
-                FileChange::Deleted { .. } => Span::styled("- deleted", data.style_deleted),
-                FileChange::Renamed { .. } => Span::styled("> renamed", data.style_renamed),
+                FileChange::Untracked { .. } => Span::styled(
+                    match icons.vcs().added() {
+                        Some(icon) => Cow::from(format!("{icon} untracked")),
+                        None => Cow::from("untracked"),
+                    },
+                    data.style_untracked,
+                ),
+                FileChange::Modified { .. } => Span::styled(
+                    match icons.vcs().modified() {
+                        Some(icon) => Cow::from(format!("{icon} modified")),
+                        None => Cow::from("modified"),
+                    },
+                    data.style_modified,
+                ),
+                FileChange::Conflict { .. } => Span::styled(
+                    match icons.vcs().conflict() {
+                        Some(icon) => Cow::from(format!("{icon} conflict")),
+                        None => Cow::from("conflict"),
+                    },
+                    data.style_conflict,
+                ),
+                FileChange::Deleted { .. } => Span::styled(
+                    match icons.vcs().removed() {
+                        Some(icon) => Cow::from(format!("{icon} deleted")),
+                        None => Cow::from("deleted"),
+                    },
+                    data.style_deleted,
+                ),
+                FileChange::Renamed { .. } => Span::styled(
+                    match icons.vcs().renamed() {
+                        Some(icon) => Cow::from(format!("{icon} renamed")),
+                        None => Cow::from("renamed"),
+                    },
+                    data.style_renamed,
+                ),
             }
             .into()
         }),
@@ -5269,6 +5341,54 @@ pub fn completion(cx: &mut Context) {
     cx.editor
         .handlers
         .trigger_completions(cursor, doc.id(), view.id);
+}
+
+pub fn inline_completion_accept(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    if let Some(c) = doc.inline_completions.take_and_clear() {
+        let text = doc.text();
+        let cursor = doc.selection(view.id).primary().cursor(text.slice(..));
+        let new_cursor = cursor + c.ghost_text.chars().count();
+        let t = Transaction::change(
+            text,
+            std::iter::once((cursor, c.replace_range.to(), Some(c.ghost_text.into()))),
+        )
+        .with_selection(Selection::point(new_cursor));
+        doc.apply(&t, view.id);
+    }
+}
+
+pub fn inline_completion_dismiss(cx: &mut Context) {
+    if doc_mut!(cx.editor)
+        .inline_completions
+        .take_and_clear()
+        .is_none()
+    {
+        normal_mode(cx);
+    }
+}
+
+pub fn inline_completion_next(cx: &mut Context) {
+    use helix_core::movement::Direction;
+    let doc = doc_mut!(cx.editor);
+    doc.inline_completions.cycle(Direction::Forward);
+    doc.inline_completions
+        .rebuild_overlays(&mut doc.inline_completion_overlays);
+}
+
+pub fn inline_completion_prev(cx: &mut Context) {
+    use helix_core::movement::Direction;
+    let doc = doc_mut!(cx.editor);
+    doc.inline_completions.cycle(Direction::Backward);
+    doc.inline_completions
+        .rebuild_overlays(&mut doc.inline_completion_overlays);
+}
+
+pub fn inline_completion_trigger(_cx: &mut Context) {
+    use helix_lsp::lsp;
+    crate::handlers::inline_completion::trigger_inline_completion(
+        lsp::InlineCompletionTriggerKind::Invoked,
+    );
 }
 
 // comments

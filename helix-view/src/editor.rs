@@ -349,6 +349,14 @@ pub struct Config {
         deserialize_with = "deserialize_duration_millis"
     )]
     pub completion_timeout: Duration,
+    /// Time in milliseconds after typing before inline completions are requested. Defaults to 150ms.
+    #[serde(
+        serialize_with = "serialize_duration_millis",
+        deserialize_with = "deserialize_duration_millis"
+    )]
+    pub inline_completion_timeout: Duration,
+    /// Automatically request inline completions while typing. Defaults to true.
+    pub inline_completion_auto_trigger: bool,
     /// Whether to insert the completion suggestion on hover. Defaults to true.
     pub preview_completion_insert: bool,
     pub completion_trigger_len: u8,
@@ -592,10 +600,17 @@ pub struct StatusLineConfig {
     pub left: Vec<StatusLineElement>,
     pub center: Vec<StatusLineElement>,
     pub right: Vec<StatusLineElement>,
-    pub separator: String,
     pub mode: ModeConfig,
     pub diagnostics: Vec<Severity>,
     pub workspace_diagnostics: Vec<Severity>,
+    pub position: StatusLinePosition,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusLinePosition {
+    Top,
+    Bottom,
 }
 
 impl Default for StatusLineConfig {
@@ -618,11 +633,17 @@ impl Default for StatusLineConfig {
                 E::Position,
                 E::FileEncoding,
             ],
-            separator: String::from("│"),
             mode: ModeConfig::default(),
             diagnostics: vec![Severity::Warning, Severity::Error],
             workspace_diagnostics: vec![Severity::Warning, Severity::Error],
+            position: StatusLinePosition::Bottom,
         }
+    }
+}
+
+impl Default for StatusLinePosition {
+    fn default() -> Self {
+        Self::Bottom
     }
 }
 
@@ -840,14 +861,12 @@ impl std::str::FromStr for GutterType {
 #[serde(default)]
 pub struct WhitespaceConfig {
     pub render: WhitespaceRender,
-    pub characters: WhitespaceCharacters,
 }
 
 impl Default for WhitespaceConfig {
     fn default() -> Self {
         Self {
             render: WhitespaceRender::Basic(WhitespaceRenderValue::None),
-            characters: WhitespaceCharacters::default(),
         }
     }
 }
@@ -974,30 +993,6 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WhitespaceCharacters {
-    pub space: char,
-    pub nbsp: char,
-    pub nnbsp: char,
-    pub tab: char,
-    pub tabpad: char,
-    pub newline: char,
-}
-
-impl Default for WhitespaceCharacters {
-    fn default() -> Self {
-        Self {
-            space: '·',   // U+00B7
-            nbsp: '⍽',    // U+237D
-            nnbsp: '␣',   // U+2423
-            tab: '→',     // U+2192
-            newline: '⏎', // U+23CE
-            tabpad: ' ',
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct IndentGuidesConfig {
     pub render: bool,
@@ -1105,6 +1100,8 @@ impl Default for Config {
             auto_save: AutoSave::default(),
             idle_timeout: Duration::from_millis(250),
             completion_timeout: Duration::from_millis(250),
+            inline_completion_timeout: Duration::from_millis(150),
+            inline_completion_auto_trigger: true,
             preview_completion_insert: true,
             completion_trigger_len: 2,
             auto_info: true,
@@ -2220,7 +2217,19 @@ impl Editor {
         let config = self.config();
         let (view, doc) = current_ref!(self);
         if let Some(mut pos) = self.cursor_cache.get(view, doc) {
-            let inner = view.inner_area(doc);
+            // Calculate the correct inner area based on statusline position
+            let inner = match config.statusline.position {
+                StatusLinePosition::Top => {
+                    // Statusline is at top, so clip top instead of bottom
+                    view.area
+                        .clip_left(view.gutter_offset(doc))
+                        .clip_top(1) // -1 for statusline at top
+                }
+                StatusLinePosition::Bottom => {
+                    // Use default inner_area (clips bottom for statusline)
+                    view.inner_area(doc)
+                }
+            };
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;
             let cursorkind = config.cursor_shape.from_mode(self.mode);
@@ -2347,6 +2356,8 @@ impl Editor {
             doc.set_selection(view.id, selection);
             doc.restore_cursor = false;
         }
+
+        doc.inline_completions.take_and_clear();
     }
 
     pub fn current_stack_frame(&self) -> Option<&dap::StackFrame> {
