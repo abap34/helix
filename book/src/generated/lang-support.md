@@ -18,7 +18,7 @@
 | blueprint | ✓ |  |  |  |  | `blueprint-compiler` |
 | bovex | ✓ |  |  |  | ✓ |  |
 | c | ✓ | ✓ | ✓ | ✓ | ✓ | `clangd` |
-| c-sharp | ✓ | ✓ |  | ✓ |  | `OmniSharp`, `csharp-ls` |
+| c-sharp | ✓ | ✓ |  | ✓ |  | `roslyn-language-server`, `OmniSharp`, `csharp-ls` |
 | c3 | ✓ |  |  |  |  | `c3-lsp` |
 | cabal |  |  |  |  |  | `haskell-language-server-wrapper` |
 | caddyfile | ✓ | ✓ | ✓ |  |  |  |
@@ -144,9 +144,9 @@
 | jq | ✓ | ✓ |  |  |  | `jq-lsp` |
 | jsdoc | ✓ |  |  |  |  |  |
 | json | ✓ | ✓ | ✓ |  | ✓ | `vscode-json-language-server` |
-| json-ld | ✓ | ✓ | ✓ |  |  | `vscode-json-language-server` |
-| json5 | ✓ |  |  |  |  |  |
-| jsonc | ✓ |  | ✓ |  | ✓ | `vscode-json-language-server` |
+| json-ld | ✓ | ✓ | ✓ |  | ✓ | `vscode-json-language-server` |
+| json5 | ✓ | ✓ | ✓ |  | ✓ |  |
+| jsonc | ✓ | ✓ | ✓ |  | ✓ | `vscode-json-language-server` |
 | jsonnet | ✓ |  |  |  |  | `jsonnet-language-server` |
 | jsx | ✓ | ✓ | ✓ | ✓ | ✓ | `typescript-language-server` |
 | julia | ✓ | ✓ | ✓ |  |  | `julia` |
