@@ -492,7 +492,11 @@ where
         .fs()
         .from_optional_path_or_lang(context.doc.path().map(|path| path.as_path()), lang)
     {
-        write(context, icon.to_span_with(|icon| format!(" {icon} ")));
+        if context.focused {
+            write(context, icon.to_span_with(|icon| format!(" {icon} ")));
+        } else {
+            write(context, format!(" {icon} ").into());
+        }
     } else {
         write(context, format!(" {lang} ").into());
     }
@@ -508,7 +512,11 @@ where
         .fs()
         .from_optional_path(context.doc.path().map(|path| path.as_path()))
     {
-        write(context, icon.to_span_with(|icon| format!(" {icon}")));
+        if context.focused {
+            write(context, icon.to_span_with(|icon| format!(" {icon}")));
+        } else {
+            write(context, format!(" {icon}").into());
+        }
     }
 }
 
@@ -516,6 +524,11 @@ fn render_path_with_emphasis<'a, F>(context: &mut RenderContext<'a>, write: F, p
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
+    if !context.focused {
+        write(context, format!(" {path} ").into());
+        return;
+    }
+
     let dir_style = Style::default().add_modifier(Modifier::DIM);
     let file_style = Style::default().add_modifier(Modifier::BOLD);
 
@@ -562,13 +575,27 @@ fn render_file_modification_indicator<'a, F>(context: &mut RenderContext<'a>, wr
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
-    let title = if context.doc.is_modified() {
-        "[+]"
+    let icons = ICONS.load();
+    let statusline = icons.ui().statusline();
+
+    let (icon, scope) = if context.doc.is_modified() {
+        (statusline.modified(), "warning")
     } else {
-        "   "
+        (statusline.saved(), "hint")
     };
 
-    write(context, title.into());
+    let scope_style = context.editor.theme.get(scope);
+    let mut style = Style::default();
+
+    if let Some(fg) = scope_style.fg {
+        style = style.fg(fg);
+    }
+
+    if context.focused {
+        style = style.add_modifier(scope_style.add_modifier | Modifier::BOLD);
+    }
+
+    write(context, Span::styled(format!(" {icon} "), style));
 }
 
 fn render_read_only_indicator<'a, F>(context: &mut RenderContext<'a>, write: F)
@@ -595,13 +622,17 @@ where
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy()))
         .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
 
-    write(
-        context,
-        Span::styled(
-            format!(" {} ", path),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    );
+    if context.focused {
+        write(
+            context,
+            Span::styled(
+                format!(" {} ", path),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        );
+    } else {
+        write(context, format!(" {} ", path).into());
+    }
 }
 
 fn render_separator<'a, F>(context: &mut RenderContext<'a>, write: F)

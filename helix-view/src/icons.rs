@@ -1197,11 +1197,23 @@ impl Virtual {
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Default)]
 pub struct Statusline {
     separator: Option<String>,
+    modified: Option<String>,
+    saved: Option<String>,
 }
 
 impl Statusline {
     #[inline]
     pub fn separator(&self) -> &str {
         self.separator.as_deref().unwrap_or("│")
+    }
+
+    #[inline]
+    pub fn modified(&self) -> &str {
+        self.modified.as_deref().unwrap_or("")
+    }
+
+    #[inline]
+    pub fn saved(&self) -> &str {
+        self.saved.as_deref().unwrap_or("")
     }
 }
