@@ -6,7 +6,7 @@ use helix_view::icons::ICONS;
 use helix_view::{
     document::{Mode, SCRATCH_BUFFER_NAME},
     graphics::Rect,
-    theme::Style,
+    theme::{Modifier, Style},
     Document, Editor, View,
 };
 
@@ -512,22 +512,35 @@ where
     }
 }
 
+fn render_path_with_emphasis<'a, F>(context: &mut RenderContext<'a>, write: F, path: &str)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    let dir_style = Style::default().add_modifier(Modifier::DIM);
+    let file_style = Style::default().add_modifier(Modifier::BOLD);
+
+    if let Some(index) = path.rfind(std::path::is_separator) {
+        let (dir, file) = path.split_at(index + 1);
+        write(context, Span::styled(format!(" {dir}"), dir_style));
+        write(context, Span::styled(format!("{file} "), file_style));
+    } else {
+        write(context, Span::styled(format!(" {path} "), file_style));
+    }
+}
+
 fn render_file_name<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
     render_file_icon(context, write);
 
-    let title = {
-        let rel_path = context.doc.relative_path();
-        let path = rel_path
-            .as_ref()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
-        format!(" {} ", path)
-    };
+    let rel_path = context.doc.relative_path();
+    let path = rel_path
+        .as_ref()
+        .map(|p| p.to_string_lossy())
+        .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
 
-    write(context, title.into());
+    render_path_with_emphasis(context, write, &path);
 }
 
 fn render_file_absolute_path<'a, F>(context: &mut RenderContext<'a>, write: F)
@@ -536,16 +549,13 @@ where
 {
     render_file_icon(context, write);
 
-    let title = {
-        let path = context.doc.path();
-        let path = path
-            .as_ref()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
-        format!(" {} ", path)
-    };
+    let path = context.doc.path();
+    let path = path
+        .as_ref()
+        .map(|p| p.to_string_lossy())
+        .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
 
-    write(context, title.into());
+    render_path_with_emphasis(context, write, &path);
 }
 
 fn render_file_modification_indicator<'a, F>(context: &mut RenderContext<'a>, write: F)
@@ -579,16 +589,19 @@ where
 {
     render_file_icon(context, write);
 
-    let title = {
-        let rel_path = context.doc.relative_path();
-        let path = rel_path
-            .as_ref()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy()))
-            .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
-        format!(" {} ", path)
-    };
+    let rel_path = context.doc.relative_path();
+    let path = rel_path
+        .as_ref()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy()))
+        .unwrap_or_else(|| SCRATCH_BUFFER_NAME.into());
 
-    write(context, title.into());
+    write(
+        context,
+        Span::styled(
+            format!(" {} ", path),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    );
 }
 
 fn render_separator<'a, F>(context: &mut RenderContext<'a>, write: F)
