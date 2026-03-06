@@ -234,9 +234,8 @@ impl<'de> serde::de::Visitor<'de> for IconVisitor {
         let glyph = glyph.ok_or_else(|| serde::de::Error::missing_field("glyph"))?;
 
         let color = if let Some(hex) = color {
-            let color = Color::from_hex(&hex).ok_or_else(|| {
-                serde::de::Error::custom(format!("`{hex} is not a valid color code`"))
-            })?;
+            let color = Color::from_hex(&hex)
+                .map_err(|_| serde::de::Error::custom(format!("`{hex}` is not a valid color code")))?;
             Some(color)
         } else {
             None

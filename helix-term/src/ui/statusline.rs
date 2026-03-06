@@ -498,10 +498,26 @@ where
     }
 }
 
+fn render_file_icon<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    let icons = ICONS.load();
+
+    if let Some(icon) = icons
+        .fs()
+        .from_optional_path(context.doc.path().map(|path| path.as_path()))
+    {
+        write(context, icon.to_span_with(|icon| format!(" {icon}")));
+    }
+}
+
 fn render_file_name<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
+    render_file_icon(context, write);
+
     let title = {
         let rel_path = context.doc.relative_path();
         let path = rel_path
@@ -518,6 +534,8 @@ fn render_file_absolute_path<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
+    render_file_icon(context, write);
+
     let title = {
         let path = context.doc.path();
         let path = path
@@ -559,6 +577,8 @@ fn render_file_base_name<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
+    render_file_icon(context, write);
+
     let title = {
         let rel_path = context.doc.relative_path();
         let path = rel_path
