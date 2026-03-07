@@ -265,7 +265,13 @@ impl EditorView {
         // if we're not at the edge of the screen, draw a right border
         if viewport.right() != view.area.right() {
             let x = area.right();
-            let border_style = theme.get("ui.window");
+            let mut border_style = theme.get("ui.window");
+            if is_focused {
+                let active_border_style = theme
+                    .try_get_exact("ui.window.active")
+                    .unwrap_or_else(|| theme.get("ui.linenr.selected"));
+                border_style = border_style.patch(active_border_style);
+            }
             for y in area.top()..area.bottom() {
                 surface[(x, y)]
                     .set_symbol(tui::symbols::line::VERTICAL)

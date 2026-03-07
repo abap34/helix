@@ -1204,7 +1204,7 @@ pub struct Statusline {
 impl Statusline {
     #[inline]
     pub fn separator(&self) -> &str {
-        self.separator.as_deref().unwrap_or("│")
+        self.separator.as_deref().unwrap_or("")
     }
 
     #[inline]

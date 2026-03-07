@@ -529,8 +529,16 @@ where
         return;
     }
 
-    let dir_style = Style::default().add_modifier(Modifier::DIM);
-    let file_style = Style::default().add_modifier(Modifier::BOLD);
+    let dir_style = context
+        .editor
+        .theme
+        .try_get_exact("ui.statusline.path")
+        .unwrap_or_else(|| Style::default().add_modifier(Modifier::DIM));
+    let file_style = context
+        .editor
+        .theme
+        .try_get_exact("ui.statusline.filename")
+        .unwrap_or_else(|| Style::default().add_modifier(Modifier::BOLD));
 
     if let Some(index) = path.rfind(std::path::is_separator) {
         let (dir, file) = path.split_at(index + 1);
@@ -659,17 +667,69 @@ fn render_version_control<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
+    let icons = ICONS.load();
     let head = context.doc.version_control_head().unwrap_or_default();
+    let mut rendered = false;
 
     if !head.is_empty() {
-        let icons = ICONS.load();
-
         let vcs = match icons.vcs().branch() {
             Some(icon) => format!(" {icon} {head} "),
             None => format!(" {head} "),
         };
 
         write(context, vcs.into());
+        rendered = true;
+    }
+
+    if let Some(diff_handle) = context.doc.diff_handle() {
+        let diff = diff_handle.load();
+        let mut added = 0u32;
+        let mut modified = 0u32;
+        let mut removed = 0u32;
+
+        for hunk_index in 0..diff.len() {
+            let hunk = diff.nth_hunk(hunk_index);
+
+            if hunk.is_pure_insertion() {
+                added += hunk.after.end - hunk.after.start;
+            } else if hunk.is_pure_removal() {
+                removed += hunk.before.end - hunk.before.start;
+            } else {
+                modified += (hunk.after.end - hunk.after.start).max(hunk.before.end - hunk.before.start);
+            }
+        }
+
+        let diff_items = [
+            (added, icons.vcs().added(), "diff.plus"),
+            (modified, icons.vcs().modified(), "diff.delta"),
+            (removed, icons.vcs().removed(), "diff.minus"),
+        ];
+
+        for (count, icon, scope) in diff_items {
+            if count == 0 {
+                continue;
+            }
+
+            if let Some(icon) = icon {
+                let mut style = Style::default();
+                let scope_style = context.editor.theme.get(scope);
+
+                if let Some(fg) = scope_style.fg {
+                    style = style.fg(fg);
+                }
+
+                if context.focused {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+
+                write(context, Span::styled(format!(" {icon}{count}"), style));
+                rendered = true;
+            }
+        }
+    }
+
+    if rendered {
+        write(context, " ".into());
     }
 }
 
