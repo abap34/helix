@@ -3127,9 +3127,7 @@ fn file_explorer(cx: &mut Context) {
         return;
     }
 
-    if let Ok(picker) = ui::file_explorer(root, cx.editor) {
-        cx.push_layer(Box::new(overlaid(picker)));
-    }
+    toggle_file_tree(cx, root);
 }
 
 fn file_explorer_in_current_buffer_directory(cx: &mut Context) {
@@ -3154,9 +3152,7 @@ fn file_explorer_in_current_buffer_directory(cx: &mut Context) {
         }
     };
 
-    if let Ok(picker) = ui::file_explorer(path, cx.editor) {
-        cx.push_layer(Box::new(overlaid(picker)));
-    }
+    toggle_file_tree(cx, path);
 }
 
 fn file_explorer_in_current_directory(cx: &mut Context) {
@@ -3167,9 +3163,20 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
         return;
     }
 
-    if let Ok(picker) = ui::file_explorer(cwd, cx.editor) {
-        cx.push_layer(Box::new(overlaid(picker)));
-    }
+    toggle_file_tree(cx, cwd);
+}
+
+fn toggle_file_tree(cx: &mut Context, root: PathBuf) {
+    cx.callback.push(Box::new(move |compositor, cx| {
+        let Some(editor_view) = compositor.find::<ui::EditorView>() else {
+            cx.editor.set_error("editor view not found");
+            return;
+        };
+
+        if let Err(err) = editor_view.toggle_file_tree(root, cx.editor) {
+            cx.editor.set_error(err.to_string());
+        }
+    }));
 }
 
 fn buffer_picker(cx: &mut Context) {

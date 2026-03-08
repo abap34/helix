@@ -695,7 +695,8 @@ where
             } else if hunk.is_pure_removal() {
                 removed += hunk.before.end - hunk.before.start;
             } else {
-                modified += (hunk.after.end - hunk.after.start).max(hunk.before.end - hunk.before.start);
+                modified +=
+                    (hunk.after.end - hunk.after.start).max(hunk.before.end - hunk.before.start);
             }
         }
 

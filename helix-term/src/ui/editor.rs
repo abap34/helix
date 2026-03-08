@@ -1,3 +1,6 @@
+mod file_tree;
+
+use self::file_tree::FileTree;
 use crate::{
     commands::{self, OnKeyCallback, OnKeyCallbackKind},
     compositor::{Component, Context, Event, EventResult},
@@ -44,6 +47,7 @@ pub struct EditorView {
     pseudo_pending: Vec<KeyEvent>,
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
+    file_tree: Option<FileTree>,
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
@@ -68,6 +72,7 @@ impl EditorView {
             pseudo_pending: Vec::new(),
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
+            file_tree: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
         }
@@ -75,6 +80,58 @@ impl EditorView {
 
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
         &mut self.spinners
+    }
+
+    pub fn toggle_file_tree(&mut self, root: PathBuf, editor: &mut Editor) -> std::io::Result<()> {
+        let root = helix_stdx::path::canonicalize(root);
+
+        if let Some(file_tree) = &mut self.file_tree {
+            if file_tree.root() == root.as_path() {
+                if file_tree.is_focused() {
+                    self.file_tree = None;
+                } else {
+                    file_tree.focus(editor)?;
+                }
+                return Ok(());
+            }
+        }
+
+        self.file_tree = Some(FileTree::new(root, editor)?);
+        Ok(())
+    }
+
+    fn handle_file_tree_event(
+        &mut self,
+        event: &Event,
+        editor: &mut Editor,
+    ) -> Option<EventResult> {
+        let interaction = self.file_tree.as_mut()?.handle_event(event, editor);
+
+        match interaction {
+            file_tree::Interaction::Ignored => None,
+            file_tree::Interaction::Consumed => Some(EventResult::Consumed(None)),
+            file_tree::Interaction::Close => {
+                self.file_tree = None;
+                Some(EventResult::Consumed(None))
+            }
+        }
+    }
+
+    fn split_content_area(&self, area: Rect, use_bufferline: bool) -> (Rect, Option<Rect>) {
+        let mut content_area = area.clip_bottom(1);
+        if use_bufferline {
+            content_area = content_area.clip_top(1);
+        }
+
+        let Some(file_tree) = &self.file_tree else {
+            return (content_area, None);
+        };
+
+        let sidebar_width = file_tree.width_for(content_area.width);
+        let sidebar_area = content_area.with_width(sidebar_width);
+        let editor_area = content_area.clip_left(sidebar_width);
+
+        (editor_area, Some(sidebar_area))
     }
 
     pub fn render_view(
@@ -1506,6 +1563,15 @@ impl Component for EditorView {
         event: &Event,
         context: &mut crate::compositor::Context,
     ) -> EventResult {
+        if matches!(event, Event::Key(_)) {
+            context.editor.reset_idle_timer();
+            context.editor.status_msg = None;
+        }
+
+        if let Some(result) = self.handle_file_tree_event(event, context.editor) {
+            return result;
+        }
+
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
@@ -1681,17 +1747,17 @@ impl Component for EditorView {
             _ => false,
         };
 
-        // -1 for commandline and -1 for bufferline
-        let mut editor_area = area.clip_bottom(1);
-        if use_bufferline {
-            editor_area = editor_area.clip_top(1);
-        }
+        let (editor_area, file_tree_area) = self.split_content_area(area, use_bufferline);
 
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
 
         if use_bufferline {
             Self::render_bufferline(cx.editor, area.with_height(1), surface);
+        }
+
+        if let (Some(file_tree), Some(file_tree_area)) = (&mut self.file_tree, file_tree_area) {
+            file_tree.render(file_tree_area, surface, cx.editor);
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
@@ -1771,6 +1837,14 @@ impl Component for EditorView {
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        if self
+            .file_tree
+            .as_ref()
+            .is_some_and(|file_tree| file_tree.is_focused())
+        {
+            return (None, CursorKind::Hidden);
+        }
+
         match editor.cursor() {
             // all block cursors are drawn manually
             (pos, CursorKind::Block) => {
