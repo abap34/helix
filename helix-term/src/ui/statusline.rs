@@ -723,7 +723,10 @@ where
                     style = style.add_modifier(Modifier::BOLD);
                 }
 
-                write(context, Span::styled(format!(" {icon}{count}"), style));
+                write(
+                    context,
+                    Span::styled(format_vcs_diff_count(icon, count), style),
+                );
                 rendered = true;
             }
         }
@@ -732,6 +735,10 @@ where
     if rendered {
         write(context, " ".into());
     }
+}
+
+fn format_vcs_diff_count(icon: &str, count: u32) -> String {
+    format!(" {icon} {count}")
 }
 
 fn render_register<'a, F>(context: &mut RenderContext<'a>, write: F)
@@ -771,4 +778,14 @@ where
         .to_string_lossy()
         .to_string();
     write(context, cwd.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_vcs_diff_count;
+
+    #[test]
+    fn vcs_diff_count_separates_icon_and_number() {
+        assert_eq!(format_vcs_diff_count("", 13), "  13");
+    }
 }
