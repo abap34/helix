@@ -1,7 +1,7 @@
 use crate::compositor::Event;
 use helix_view::{
     editor::Action,
-    graphics::{Modifier, Rect},
+    graphics::{Modifier, Rect, Style},
     icons::ICONS,
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
@@ -15,11 +15,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use tui::buffer::Buffer as Surface;
+use tui::text::{Span, Spans};
 
 const MIN_SIDEBAR_WIDTH: u16 = 18;
 const MAX_SIDEBAR_WIDTH: u16 = 36;
 const MIN_EDITOR_WIDTH: u16 = 40;
-const HEADER_HEIGHT: u16 = 2;
+const HEADER_HEIGHT: u16 = 1;
 const INDENT_STEP: usize = 2;
 
 pub(super) enum Interaction {
@@ -120,10 +121,23 @@ impl FileTree {
             .theme
             .try_get("ui.menu")
             .unwrap_or_else(|| editor.theme.get("ui.popup"));
-        let header_style = editor
+        let header_style = if self.focused {
+            editor.theme.try_get("ui.statusline").unwrap_or(panel_style)
+        } else {
+            editor
+                .theme
+                .try_get("ui.statusline.inactive")
+                .or_else(|| editor.theme.try_get("ui.statusline"))
+                .unwrap_or(panel_style)
+        };
+        let header_dir_style = editor
             .theme
-            .try_get("ui.picker.header")
-            .unwrap_or_else(|| panel_style.add_modifier(Modifier::BOLD));
+            .try_get_exact("ui.statusline.path")
+            .unwrap_or_else(|| Style::default().add_modifier(Modifier::DIM));
+        let header_file_style = editor
+            .theme
+            .try_get_exact("ui.statusline.filename")
+            .unwrap_or_else(|| Style::default().add_modifier(Modifier::BOLD));
         let selected_style = editor
             .theme
             .try_get("ui.menu.selected")
@@ -131,7 +145,6 @@ impl FileTree {
         let directory_style = editor.theme.get("ui.text.directory");
         let text_style = editor.theme.get("ui.text");
         let focus_style = editor.theme.get("ui.text.focus");
-        let separator_style = editor.theme.get("ui.background.separator");
         let border_style = if self.focused {
             editor.theme.get("ui.window").patch(
                 editor
@@ -163,28 +176,17 @@ impl FileTree {
         }
 
         let header_x = inner.x.saturating_add(1);
-        let header_width = inner.width.saturating_sub(2) as usize;
-
-        surface.set_stringn(
-            header_x,
-            inner.y,
-            self.root.display().to_string(),
-            header_width,
-            if self.focused {
-                header_style
-            } else {
-                panel_style
-            },
+        let header_width = inner.width.saturating_sub(2);
+        let header = file_tree_header(
+            &self.root.display().to_string(),
+            self.focused,
+            header_style,
+            header_dir_style,
+            header_file_style,
         );
-
-        let separator_y = inner.y.saturating_add(1);
-        if separator_y < inner.bottom() {
-            for x in inner.left()..inner.right() {
-                if let Some(cell) = surface.get_mut(x, separator_y) {
-                    cell.set_symbol(tui::symbols::line::HORIZONTAL)
-                        .set_style(separator_style);
-                }
-            }
+        surface.set_style(Rect::new(inner.x, inner.y, inner.width, 1), header_style);
+        if header_width > 0 {
+            surface.set_spans(header_x, inner.y, &header, header_width);
         }
 
         let current_path = current_document_path(editor);
@@ -638,6 +640,31 @@ fn current_document_path(editor: &Editor) -> Option<PathBuf> {
     doc.path().map(helix_stdx::path::canonicalize)
 }
 
+fn file_tree_header(
+    path: &str,
+    focused: bool,
+    base_style: Style,
+    dir_style: Style,
+    file_style: Style,
+) -> Spans<'static> {
+    if !focused {
+        return Spans(vec![Span::styled(format!(" {path} "), base_style)]);
+    }
+
+    if let Some(index) = path.rfind(std::path::is_separator) {
+        let (dir, file) = path.split_at(index + 1);
+        return Spans(vec![
+            Span::styled(format!(" {dir}"), base_style.patch(dir_style)),
+            Span::styled(format!("{file} "), base_style.patch(file_style)),
+        ]);
+    }
+
+    Spans(vec![Span::styled(
+        format!(" {path} "),
+        base_style.patch(file_style),
+    )])
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -675,4 +702,39 @@ fn read_directory_entries(root: &Path, editor: &Editor) -> io::Result<Vec<(PathB
     entries.sort_by(|(path1, is_dir1), (path2, is_dir2)| (!is_dir1, path1).cmp(&(!is_dir2, path2)));
 
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_tree_header;
+    use helix_view::graphics::{Modifier, Style};
+
+    #[test]
+    fn focused_header_splits_directory_and_basename() {
+        let header = file_tree_header(
+            "/tmp/workspace",
+            true,
+            Style::default(),
+            Style::default().add_modifier(Modifier::DIM),
+            Style::default().add_modifier(Modifier::BOLD),
+        );
+
+        assert_eq!(header.0.len(), 2);
+        assert_eq!(header.0[0].content.as_ref(), " /tmp/");
+        assert_eq!(header.0[1].content.as_ref(), "workspace ");
+    }
+
+    #[test]
+    fn inactive_header_keeps_single_quiet_span() {
+        let header = file_tree_header(
+            "/tmp/workspace",
+            false,
+            Style::default(),
+            Style::default().add_modifier(Modifier::DIM),
+            Style::default().add_modifier(Modifier::BOLD),
+        );
+
+        assert_eq!(header.0.len(), 1);
+        assert_eq!(header.0[0].content.as_ref(), " /tmp/workspace ");
+    }
 }
