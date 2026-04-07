@@ -116,6 +116,10 @@ impl FileTree {
         self.reveal_current_document(editor)
     }
 
+    pub(super) fn refresh(&mut self, editor: &Editor) -> io::Result<()> {
+        self.rebuild(editor)
+    }
+
     pub(super) fn handle_event(&mut self, event: &Event, editor: &mut Editor) -> Interaction {
         match event {
             Event::Key(key) => self.handle_key(*key, editor),

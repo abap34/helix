@@ -1825,6 +1825,15 @@ impl Component for EditorView {
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         // clear with background color
         surface.set_style(area, cx.editor.theme.get("ui.background"));
+
+        if cx.editor.take_file_tree_refresh() {
+            if let Some(file_tree) = &mut self.file_tree {
+                if let Err(err) = file_tree.refresh(cx.editor) {
+                    cx.editor.set_error(err.to_string());
+                }
+            }
+        }
+
         let config = cx.editor.config();
 
         // check if bufferline should be rendered

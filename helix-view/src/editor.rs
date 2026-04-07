@@ -1230,6 +1230,7 @@ pub struct Editor {
 
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
+    refresh_file_tree: bool,
     /// Cached position of the cursor calculated during rendering.
     /// The content of `cursor_cache` is returned by `Editor::cursor` if
     /// set to `Some(_)`. The value will be cleared after it's used.
@@ -1374,6 +1375,7 @@ impl Editor {
             exit_code: 0,
             config_events: unbounded_channel(),
             needs_redraw: false,
+            refresh_file_tree: false,
             handlers,
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),
@@ -1538,6 +1540,15 @@ impl Editor {
         self.language_servers
             .file_event_handler
             .file_changed(path.to_path_buf());
+    }
+
+    pub fn request_file_tree_refresh(&mut self) {
+        self.refresh_file_tree = true;
+        self.needs_redraw = true;
+    }
+
+    pub fn take_file_tree_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.refresh_file_tree)
     }
 
     pub fn reload_all_documents(&mut self) {

@@ -1453,6 +1453,7 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
     }
 
     cx.editor.reload_all_documents();
+    cx.editor.request_file_tree_refresh();
     Ok(())
 }
 
