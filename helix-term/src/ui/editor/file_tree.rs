@@ -1,4 +1,6 @@
 use crate::compositor::Event;
+use anyhow::{anyhow, ensure};
+use helix_stdx::path::{expand_tilde, normalize};
 use helix_view::{
     editor::Action,
     graphics::{Modifier, Rect, Style},
@@ -11,7 +13,7 @@ use ignore::WalkBuilder;
 use std::{
     collections::HashSet,
     error::Error,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 use tui::buffer::Buffer as Surface;
@@ -26,7 +28,17 @@ const INDENT_STEP: usize = 2;
 pub(super) enum Interaction {
     Ignored,
     Consumed,
+    Action(FileTreeAction),
     Close,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum FileTreeAction {
+    CreateFile { base_dir: PathBuf },
+    CreateDirectory { base_dir: PathBuf },
+    ReloadAll,
+    Rename { target: PathBuf },
+    Delete { target: PathBuf },
 }
 
 #[derive(Clone)]
@@ -293,55 +305,92 @@ impl FileTree {
             return Interaction::Ignored;
         }
 
-        let handled = match (key.code, key.modifiers) {
+        match (key.code, key.modifiers) {
             (KeyCode::Esc, KeyModifiers::NONE) => {
                 self.focused = false;
-                true
+                Interaction::Consumed
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => return Interaction::Close,
             (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 self.move_cursor(-1, editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 self.move_cursor(1, editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::PageUp, KeyModifiers::NONE) => {
                 self.move_cursor(-(self.visible_rows() as isize).max(1), editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::PageDown, KeyModifiers::NONE) => {
                 self.move_cursor((self.visible_rows() as isize).max(1), editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::Home, KeyModifiers::NONE) => {
                 self.set_cursor(0, editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::End, KeyModifiers::NONE) => {
                 self.set_cursor(self.entries.len().saturating_sub(1), editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::Left, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                 self.handle_left(editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                 self.handle_right(editor);
-                true
+                Interaction::Consumed
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 self.activate_current(editor);
-                true
+                Interaction::Consumed
             }
-            _ => false,
-        };
-
-        if handled {
-            Interaction::Consumed
-        } else {
-            Interaction::Ignored
+            (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                let Some(base_dir) = self.selected_base_dir() else {
+                    editor.set_error("No file tree entry selected");
+                    return Interaction::Consumed;
+                };
+                Interaction::Action(FileTreeAction::CreateFile { base_dir })
+            }
+            (KeyCode::Char('A'), KeyModifiers::NONE) => {
+                let Some(base_dir) = self.selected_base_dir() else {
+                    editor.set_error("No file tree entry selected");
+                    return Interaction::Consumed;
+                };
+                Interaction::Action(FileTreeAction::CreateDirectory { base_dir })
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                Interaction::Action(FileTreeAction::ReloadAll)
+            }
+            (KeyCode::Char('R'), KeyModifiers::NONE) => {
+                let Some(entry) = self.entries.get(self.cursor) else {
+                    editor.set_error("No file tree entry selected");
+                    return Interaction::Consumed;
+                };
+                if entry.path == self.root {
+                    editor.set_error("Cannot rename the file tree root");
+                    return Interaction::Consumed;
+                }
+                Interaction::Action(FileTreeAction::Rename {
+                    target: entry.path.clone(),
+                })
+            }
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                let Some(entry) = self.entries.get(self.cursor) else {
+                    editor.set_error("No file tree entry selected");
+                    return Interaction::Consumed;
+                };
+                if entry.path == self.root {
+                    editor.set_error("Cannot delete the file tree root");
+                    return Interaction::Consumed;
+                }
+                Interaction::Action(FileTreeAction::Delete {
+                    target: entry.path.clone(),
+                })
+            }
+            _ => Interaction::Ignored,
         }
     }
 
@@ -632,6 +681,194 @@ impl FileTree {
             .rev()
             .find(|candidate| self.entries[*candidate].depth == depth - 1)
     }
+
+    pub(super) fn apply_action(
+        &mut self,
+        action: FileTreeAction,
+        input: &str,
+        editor: &mut Editor,
+    ) -> anyhow::Result<()> {
+        match action {
+            FileTreeAction::CreateFile { base_dir } => {
+                self.create_entry(&base_dir, input, false, editor)
+            }
+            FileTreeAction::CreateDirectory { base_dir } => {
+                self.create_entry(&base_dir, input, true, editor)
+            }
+            FileTreeAction::ReloadAll => {
+                editor.reload_all_documents();
+                self.focus(editor)?;
+                Ok(())
+            }
+            FileTreeAction::Rename { target } => self.rename_entry(&target, input, editor),
+            FileTreeAction::Delete { target } => self.delete_entry(&target, editor),
+        }
+    }
+
+    fn selected_base_dir(&self) -> Option<PathBuf> {
+        let entry = self.entries.get(self.cursor)?;
+        Some(if entry.is_dir() {
+            entry.path.clone()
+        } else {
+            entry
+                .path
+                .parent()
+                .unwrap_or(self.root.as_path())
+                .to_path_buf()
+        })
+    }
+
+    fn create_entry(
+        &mut self,
+        base_dir: &Path,
+        input: &str,
+        is_dir: bool,
+        editor: &mut Editor,
+    ) -> anyhow::Result<()> {
+        let path = resolve_input_path(base_dir, input)?;
+        ensure!(
+            path.starts_with(&self.root),
+            "path must stay within the file tree root"
+        );
+        ensure!(!path.exists(), "\"{}\" already exists", path.display());
+
+        if is_dir {
+            fs::create_dir_all(&path)?;
+            self.expanded.insert(path.clone());
+            editor.notify_file_changed(&path);
+            self.refresh_to_path(&path, editor)?;
+            editor.set_status(format!(
+                "Created directory '{}'",
+                self.relative_label(&path)
+            ));
+            return Ok(());
+        }
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("new file path has no parent directory"))?;
+        fs::create_dir_all(parent)?;
+        fs::write(&path, [])?;
+        editor.notify_file_changed(&path);
+        self.refresh_to_path(&path, editor)?;
+        self.focused = false;
+        editor.set_status(format!("Created file '{}'", self.relative_label(&path)));
+        Ok(())
+    }
+
+    fn rename_entry(
+        &mut self,
+        target: &Path,
+        input: &str,
+        editor: &mut Editor,
+    ) -> anyhow::Result<()> {
+        ensure!(target != self.root, "cannot rename the file tree root");
+        let destination = resolve_rename_destination(target, input)?;
+        self.ensure_destination_within_root(&destination)?;
+        self.ensure_destination_available(target, &destination)?;
+
+        let was_dir = target.is_dir();
+        editor.move_path(target, &destination)?;
+        if was_dir {
+            self.remap_expanded_paths(target, &destination);
+        }
+        self.refresh_to_path(&destination, editor)?;
+        editor.set_status(format!(
+            "Renamed '{}' to '{}'",
+            self.relative_label(target),
+            self.relative_label(&destination)
+        ));
+        Ok(())
+    }
+
+    fn delete_entry(&mut self, target: &Path, editor: &mut Editor) -> anyhow::Result<()> {
+        ensure!(target != self.root, "cannot delete the file tree root");
+        editor.remove_path(target)?;
+        self.expanded.retain(|path| !path.starts_with(target));
+        self.rebuild(editor)?;
+        editor.set_status(format!("Deleted '{}'", self.relative_label(target)));
+        Ok(())
+    }
+
+    fn ensure_destination_available(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> anyhow::Result<()> {
+        if destination == source {
+            return Ok(());
+        }
+
+        ensure!(
+            !destination.exists(),
+            "destination already exists: {}",
+            destination.display()
+        );
+        Ok(())
+    }
+
+    fn ensure_destination_within_root(&self, destination: &Path) -> anyhow::Result<()> {
+        ensure!(
+            destination.starts_with(&self.root),
+            "destination must stay within the file tree root"
+        );
+        Ok(())
+    }
+
+    fn refresh_to_path(&mut self, path: &Path, editor: &mut Editor) -> io::Result<()> {
+        self.expand_ancestors(path);
+        self.rebuild(editor)?;
+        if let Some(index) = self.entries.iter().position(|entry| entry.path == path) {
+            self.cursor = index;
+        }
+        self.ensure_cursor_visible();
+        self.preview_current(editor);
+        Ok(())
+    }
+
+    fn expand_ancestors(&mut self, path: &Path) {
+        let mut ancestor = if path.is_dir() {
+            Some(path)
+        } else {
+            path.parent()
+        };
+
+        while let Some(dir) = ancestor {
+            if !dir.starts_with(&self.root) {
+                break;
+            }
+            self.expanded.insert(dir.to_path_buf());
+            if dir == self.root {
+                break;
+            }
+            ancestor = dir.parent();
+        }
+    }
+
+    fn remap_expanded_paths(&mut self, source: &Path, destination: &Path) {
+        let updates: Vec<_> = self
+            .expanded
+            .iter()
+            .filter_map(|path| {
+                let suffix = path.strip_prefix(source).ok()?;
+                Some((path.clone(), destination.join(suffix)))
+            })
+            .collect();
+
+        for (old_path, _) in &updates {
+            self.expanded.remove(old_path);
+        }
+        for (_, new_path) in updates {
+            self.expanded.insert(new_path);
+        }
+    }
+
+    fn relative_label(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
 }
 
 fn current_document_path(editor: &Editor) -> Option<PathBuf> {
@@ -671,6 +908,39 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn resolve_input_path(base_dir: &Path, input: &str) -> anyhow::Result<PathBuf> {
+    let input = input.trim();
+    ensure!(!input.is_empty(), "path cannot be empty");
+
+    let path = expand_tilde(Path::new(input));
+    let path = if path.is_absolute() {
+        path.into_owned()
+    } else {
+        base_dir.join(path.as_ref())
+    };
+
+    Ok(normalize(path))
+}
+
+fn resolve_rename_destination(target: &Path, input: &str) -> anyhow::Result<PathBuf> {
+    let input = input.trim();
+    ensure!(!input.is_empty(), "path cannot be empty");
+
+    let path = Path::new(input);
+    ensure!(
+        path.components().count() == 1 && path.file_name().is_some(),
+        "rename expects a single file or directory name"
+    );
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("rename expects a file or directory name"))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("selected path has no parent directory"))?;
+    Ok(parent.join(file_name))
+}
+
 fn read_directory_entries(root: &Path, editor: &Editor) -> io::Result<Vec<(PathBuf, bool)>> {
     let config = editor.config();
     let mut walk_builder = WalkBuilder::new(root);
@@ -706,8 +976,9 @@ fn read_directory_entries(root: &Path, editor: &Editor) -> io::Result<Vec<(PathB
 
 #[cfg(test)]
 mod tests {
-    use super::file_tree_header;
+    use super::{file_tree_header, resolve_input_path, resolve_rename_destination};
     use helix_view::graphics::{Modifier, Style};
+    use std::path::Path;
 
     #[test]
     fn focused_header_splits_directory_and_basename() {
@@ -736,5 +1007,23 @@ mod tests {
 
         assert_eq!(header.0.len(), 1);
         assert_eq!(header.0[0].content.as_ref(), " /tmp/workspace ");
+    }
+
+    #[test]
+    fn resolve_input_path_uses_base_directory() {
+        let path = resolve_input_path(Path::new("/tmp/workspace"), "src/main.rs").unwrap();
+
+        assert_eq!(path, Path::new("/tmp/workspace/src/main.rs"));
+    }
+
+    #[test]
+    fn resolve_rename_destination_rejects_nested_paths() {
+        let err = resolve_rename_destination(Path::new("/tmp/workspace/main.rs"), "src/main.rs")
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "rename expects a single file or directory name"
+        );
     }
 }

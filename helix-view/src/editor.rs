@@ -1311,6 +1311,16 @@ pub enum CloseError {
     SaveError(anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RemovePathError {
+    #[error("buffer modified: {0}")]
+    BufferModified(String),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 impl Editor {
     pub fn new(
         mut area: Rect,
@@ -1524,6 +1534,55 @@ impl Editor {
         self.launch_language_servers(doc_id)
     }
 
+    pub fn notify_file_changed(&self, path: &Path) {
+        self.language_servers
+            .file_event_handler
+            .file_changed(path.to_path_buf());
+    }
+
+    pub fn reload_all_documents(&mut self) {
+        let scrolloff = self.config().scrolloff;
+        let fallback_view_id = self.tree.focus;
+        let file_event_handler = self.language_servers.file_event_handler.clone();
+
+        let docs_view_ids: Vec<(DocumentId, Vec<ViewId>)> = self
+            .documents_mut()
+            .map(|doc| {
+                let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+
+                if view_ids.is_empty() {
+                    doc.ensure_view_init(fallback_view_id);
+                    view_ids.push(fallback_view_id);
+                }
+
+                (doc.id(), view_ids)
+            })
+            .collect();
+
+        for (doc_id, view_ids) in docs_view_ids {
+            let doc = doc_mut!(self, &doc_id);
+            let view = view_mut!(self, view_ids[0]);
+
+            view.sync_changes(doc);
+
+            if let Err(error) = doc.reload(view, &self.diff_providers) {
+                self.set_error(format!("{}", error));
+                continue;
+            }
+
+            if let Some(path) = doc.path() {
+                file_event_handler.file_changed(path.clone());
+            }
+
+            for view_id in view_ids {
+                let view = view_mut!(self, view_id);
+                if view.doc == doc_id {
+                    view.ensure_cursor_in_view(doc, scrolloff);
+                }
+            }
+        }
+    }
+
     /// moves/renames a path, invoking any event handlers (currently only lsp)
     /// and calling `set_doc_path` if the file is open in the editor
     pub fn move_path(&mut self, old_path: &Path, new_path: &Path) -> io::Result<()> {
@@ -1555,12 +1614,28 @@ impl Editor {
             }
         }
 
+        let affected_docs: Vec<_> = self
+            .documents
+            .values()
+            .filter_map(|doc| {
+                let doc_path = doc.path()?;
+                if is_dir {
+                    let suffix = doc_path.strip_prefix(old_path).ok()?;
+                    Some((doc.id(), new_path.join(suffix)))
+                } else if doc_path == old_path {
+                    Some((doc.id(), new_path.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         if old_path.exists() {
             fs::rename(old_path, &new_path)?;
         }
 
-        if let Some(doc) = self.document_by_path(old_path) {
-            self.set_doc_path(doc.id(), &new_path);
+        for (doc_id, moved_path) in affected_docs {
+            self.set_doc_path(doc_id, &moved_path);
         }
         let is_dir = new_path.is_dir();
         for ls in self.language_servers.iter_clients() {
@@ -1577,6 +1652,47 @@ impl Editor {
         self.language_servers
             .file_event_handler
             .file_changed(new_path);
+        Ok(())
+    }
+
+    pub fn remove_path(&mut self, path: &Path) -> Result<(), RemovePathError> {
+        let path = canonicalize(path);
+        let is_dir = path.is_dir();
+        let affected_docs: Vec<_> = self
+            .documents
+            .values()
+            .filter_map(|doc| {
+                let doc_path = doc.path()?;
+                if doc_path == &path || (is_dir && doc_path.starts_with(&path)) {
+                    Some((doc.id(), doc.is_modified(), doc.display_name().into_owned()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if let Some((_, _, name)) = affected_docs.iter().find(|(_, modified, _)| *modified) {
+            return Err(RemovePathError::BufferModified(name.clone()));
+        }
+
+        if is_dir {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+
+        for (doc_id, _, _) in affected_docs {
+            self.close_document(doc_id, false)
+                .map_err(|err| match err {
+                    CloseError::DoesNotExist => {
+                        RemovePathError::Other(anyhow!("document does not exist"))
+                    }
+                    CloseError::BufferModified(name) => RemovePathError::BufferModified(name),
+                    CloseError::SaveError(err) => RemovePathError::Other(err),
+                })?;
+        }
+
+        self.notify_file_changed(&path);
         Ok(())
     }
 
@@ -2223,9 +2339,7 @@ impl Editor {
             let inner = match config.statusline.position {
                 StatusLinePosition::Top => {
                     // Statusline is at top, so clip top instead of bottom
-                    view.area
-                        .clip_left(view.gutter_offset(doc))
-                        .clip_top(1) // -1 for statusline at top
+                    view.area.clip_left(view.gutter_offset(doc)).clip_top(1) // -1 for statusline at top
                 }
                 StatusLinePosition::Bottom => {
                     // Use default inner_area (clips bottom for statusline)

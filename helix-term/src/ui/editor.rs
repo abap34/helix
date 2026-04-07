@@ -1,12 +1,12 @@
 mod file_tree;
 
-use self::file_tree::FileTree;
+use self::file_tree::{FileTree, FileTreeAction};
 use crate::{
     commands::{self, OnKeyCallback, OnKeyCallbackKind},
     compositor::{Component, Context, Event, EventResult},
     events::{OnModeSwitch, PostCommand},
     handlers::completion::CompletionItem,
-    key,
+    job, key,
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
@@ -100,6 +100,83 @@ impl EditorView {
         Ok(())
     }
 
+    fn apply_file_tree_action(
+        &mut self,
+        action: FileTreeAction,
+        input: &str,
+        editor: &mut Editor,
+    ) -> anyhow::Result<()> {
+        let file_tree = self
+            .file_tree
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("file tree is not open"))?;
+        file_tree.apply_action(action, input, editor)
+    }
+
+    fn open_file_tree_prompt(
+        compositor: &mut crate::compositor::Compositor,
+        cx: &mut Context,
+        action: FileTreeAction,
+    ) {
+        let (prompt_label, initial_input) = match &action {
+            FileTreeAction::CreateFile { .. } => ("new-file:".into(), String::new()),
+            FileTreeAction::CreateDirectory { .. } => ("new-directory:".into(), String::new()),
+            FileTreeAction::ReloadAll => return,
+            FileTreeAction::Rename { target } => (
+                "rename-to:".into(),
+                target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            FileTreeAction::Delete { target } => (
+                format!("delete '{}' ? [y/N]:", target.display()).into(),
+                String::new(),
+            ),
+        };
+
+        let prompt_action = action.clone();
+        let mut prompt = crate::ui::Prompt::new(
+            prompt_label,
+            None,
+            crate::ui::completers::none,
+            move |cx: &mut Context, input: &str, event| {
+                if event != crate::ui::PromptEvent::Validate {
+                    return;
+                }
+
+                if matches!(&prompt_action, FileTreeAction::Delete { .. })
+                    && !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+                {
+                    return;
+                }
+
+                let action = prompt_action.clone();
+                let input = input.to_string();
+                cx.jobs.callback(async move {
+                    Ok(job::Callback::EditorCompositor(Box::new(
+                        move |editor, compositor| {
+                            let Some(editor_view) = compositor.find::<EditorView>() else {
+                                editor.set_error("editor view not found");
+                                return;
+                            };
+
+                            if let Err(err) =
+                                editor_view.apply_file_tree_action(action, &input, editor)
+                            {
+                                editor.set_error(err.to_string());
+                            }
+                        },
+                    )))
+                });
+            },
+        )
+        .with_line(initial_input, cx.editor);
+
+        prompt.recalculate_completion(cx.editor);
+        compositor.push(Box::new(prompt));
+    }
+
     fn handle_file_tree_event(
         &mut self,
         event: &Event,
@@ -110,6 +187,18 @@ impl EditorView {
         match interaction {
             file_tree::Interaction::Ignored => None,
             file_tree::Interaction::Consumed => Some(EventResult::Consumed(None)),
+            file_tree::Interaction::Action(FileTreeAction::ReloadAll) => {
+                if let Err(err) = self.apply_file_tree_action(FileTreeAction::ReloadAll, "", editor)
+                {
+                    editor.set_error(err.to_string());
+                }
+                Some(EventResult::Consumed(None))
+            }
+            file_tree::Interaction::Action(action) => Some(EventResult::Consumed(Some(Box::new(
+                move |compositor, cx| {
+                    Self::open_file_tree_prompt(compositor, cx, action);
+                },
+            )))),
             file_tree::Interaction::Close => {
                 self.file_tree = None;
                 Some(EventResult::Consumed(None))
@@ -148,9 +237,7 @@ impl EditorView {
         let inner = match config.statusline.position {
             helix_view::editor::StatusLinePosition::Top => {
                 // Statusline is at top, so clip top instead of bottom
-                view.area
-                    .clip_left(view.gutter_offset(doc))
-                    .clip_top(1) // -1 for statusline at top
+                view.area.clip_left(view.gutter_offset(doc)).clip_top(1) // -1 for statusline at top
             }
             helix_view::editor::StatusLinePosition::Bottom => {
                 // Use default inner_area (clips bottom for statusline)
@@ -344,9 +431,7 @@ impl EditorView {
         }
 
         let statusline_area = match config.statusline.position {
-            helix_view::editor::StatusLinePosition::Top => {
-                view.area.with_height(1)
-            }
+            helix_view::editor::StatusLinePosition::Top => view.area.with_height(1),
             helix_view::editor::StatusLinePosition::Bottom => {
                 view.area
                     .clip_top(view.area.height.saturating_sub(1))
@@ -925,7 +1010,12 @@ impl EditorView {
     }
 
     /// Apply the highlighting on the lines where a cursor is active
-    pub fn cursorline(doc: &Document, view: &View, theme: &Theme, viewport: Rect) -> impl Decoration {
+    pub fn cursorline(
+        doc: &Document,
+        view: &View,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> impl Decoration {
         let text = doc.text().slice(..);
         // TODO only highlight the visual line that contains the cursor instead of the full visual line
         let primary_line = doc.selection(view.id).primary().cursor_line(text);
@@ -1296,9 +1386,7 @@ impl EditorView {
                     helix_view::editor::StatusLinePosition::Top => {
                         view.area.clip_left(view.gutter_offset(doc)).clip_top(1)
                     }
-                    helix_view::editor::StatusLinePosition::Bottom => {
-                        view.inner_area(doc)
-                    }
+                    helix_view::editor::StatusLinePosition::Bottom => view.inner_area(doc),
                 };
 
                 // Check if the click is within the inner area
