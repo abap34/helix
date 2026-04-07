@@ -7,7 +7,8 @@ use crate::{editor::Config, Document, DocumentId, Editor, ViewId};
 events! {
     DocumentDidOpen<'a> {
         editor: &'a mut Editor,
-        doc: DocumentId
+        doc: DocumentId,
+        path: &'a std::path::PathBuf
     }
     DocumentDidChange<'a> {
         doc: &'a mut Document,

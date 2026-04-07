@@ -174,6 +174,44 @@ impl Default for GutterLineNumbersConfig {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InlineBlameBehaviour {
+    /// Do not show inline blame
+    ///
+    /// Loads blame for the file in the background when the document is
+    /// opened and request it again when it is `:reload`ed.
+    ///
+    /// This allows instantaneous access to line blame with `space + B` and when
+    /// `:toggle inline-blame.enable` but for the cost of consuming more
+    /// resources in the background
+    Background,
+    /// Do not show inline blame, and do not request it in the background
+    ///
+    /// When manually requesting the inline blame, it may take several seconds to appear.
+    Disabled,
+    /// Show the inline blame
+    Visible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct InlineBlameConfig {
+    /// Show inline blame for a line when cursor is on that line
+    pub behaviour: InlineBlameBehaviour,
+    /// How the inline blame should look like and the information it includes
+    pub format: String,
+}
+
+impl Default for InlineBlameConfig {
+    fn default() -> Self {
+        Self {
+            behaviour: InlineBlameBehaviour::Disabled,
+            format: "{author}, {time-ago} • {message} • {commit}".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct FilePickerConfig {
@@ -428,6 +466,8 @@ pub struct Config {
     pub end_of_line_diagnostics: DiagnosticFilter,
     // Set to override the default clipboard provider
     pub clipboard_provider: ClipboardProvider,
+    /// Inline blame allows showing the latest commit that affected the line the cursor is on as virtual text.
+    pub inline_blame: InlineBlameConfig,
     /// Whether to read settings from [EditorConfig](https://editorconfig.org) files. Defaults to
     /// `true`.
     pub editor_config: bool,
@@ -1141,6 +1181,7 @@ impl Default for Config {
             inline_diagnostics: InlineDiagnosticsConfig::default(),
             end_of_line_diagnostics: DiagnosticFilter::Enable(Severity::Hint),
             clipboard_provider: ClipboardProvider::default(),
+            inline_blame: InlineBlameConfig::default(),
             editor_config: true,
             rainbow_brackets: false,
             kitty_keyboard_protocol: Default::default(),
@@ -2051,11 +2092,13 @@ impl Editor {
             doc.set_version_control_head(self.diff_providers.get_current_head_name(&path));
 
             let id = self.new_document(doc);
+
             self.launch_language_servers(id);
 
             helix_event::dispatch(DocumentDidOpen {
                 editor: self,
                 doc: id,
+                path: &path,
             });
 
             id

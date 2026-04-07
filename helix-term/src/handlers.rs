@@ -12,10 +12,12 @@ use crate::handlers::signature_help::SignatureHelpHandler;
 
 pub use helix_view::handlers::{word_index, Handlers};
 
+use self::blame::BlameHandler;
 use self::document_colors::DocumentColorsHandler;
 use self::inline_completion::InlineCompletionHandler;
 
 mod auto_save;
+pub mod blame;
 pub mod completion;
 pub mod diagnostics;
 mod document_colors;
@@ -35,12 +37,14 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     let pull_diagnostics = PullDiagnosticsHandler::default().spawn();
     let pull_all_documents_diagnostics = PullAllDocumentsDiagnosticHandler::default().spawn();
     let inline_completions = InlineCompletionHandler::new(config.clone()).spawn();
+    let blame = BlameHandler::default().spawn();
 
     let handlers = Handlers {
         completions: helix_view::handlers::completion::CompletionHandler::new(event_tx),
         signature_hints,
         auto_save,
         document_colors,
+        blame,
         word_index,
         pull_diagnostics,
         pull_all_documents_diagnostics,
@@ -54,6 +58,9 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     diagnostics::register_hooks(&handlers);
     snippet::register_hooks(&handlers);
     document_colors::register_hooks(&handlers);
+    inline_completion::register_hooks(&handlers);
+    prompt::register_hooks(&handlers);
+    blame::register_hooks(&handlers);
     inline_completion::register_hooks(&handlers);
     prompt::register_hooks(&handlers);
     handlers
