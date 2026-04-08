@@ -22,6 +22,8 @@ use tui::text::{Span, Spans};
 const MIN_SIDEBAR_WIDTH: u16 = 18;
 const MAX_SIDEBAR_WIDTH: u16 = 36;
 const MIN_EDITOR_WIDTH: u16 = 40;
+const DEFAULT_SIDEBAR_WIDTH_PERCENT: u16 = 28;
+const SIDEBAR_RESIZE_STEP: u16 = 2;
 const HEADER_HEIGHT: u16 = 1;
 const INDENT_STEP: usize = 2;
 
@@ -73,6 +75,8 @@ pub(super) struct FileTree {
     scroll: usize,
     focused: bool,
     area: Rect,
+    preferred_width: Option<u16>,
+    available_width: u16,
 }
 
 impl FileTree {
@@ -85,6 +89,8 @@ impl FileTree {
             scroll: 0,
             focused: true,
             area: Rect::default(),
+            preferred_width: None,
+            available_width: MIN_SIDEBAR_WIDTH.saturating_add(MIN_EDITOR_WIDTH),
         };
 
         tree.expanded.insert(tree.root.clone());
@@ -100,14 +106,9 @@ impl FileTree {
         self.focused
     }
 
-    pub(super) fn width_for(&self, available_width: u16) -> u16 {
-        let min_width = MIN_SIDEBAR_WIDTH.min(available_width);
-        let max_width = available_width
-            .saturating_sub(MIN_EDITOR_WIDTH)
-            .clamp(min_width, MAX_SIDEBAR_WIDTH.min(available_width));
-        let desired = ((available_width as u32) * 28 / 100) as u16;
-
-        desired.clamp(min_width, max_width.max(min_width))
+    pub(super) fn width_for(&mut self, available_width: u16) -> u16 {
+        self.available_width = available_width;
+        self.width_for_available(available_width)
     }
 
     pub(super) fn focus(&mut self, editor: &mut Editor) -> io::Result<()> {
@@ -309,6 +310,9 @@ impl FileTree {
             return Interaction::Ignored;
         }
 
+        let mut key = key;
+        canonicalize_key(&mut key);
+
         match (key.code, key.modifiers) {
             (KeyCode::Esc, KeyModifiers::NONE) => {
                 self.focused = false;
@@ -345,6 +349,14 @@ impl FileTree {
             }
             (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                 self.handle_right(editor);
+                Interaction::Consumed
+            }
+            (KeyCode::Char('H'), KeyModifiers::NONE) => {
+                self.resize_by(-(SIDEBAR_RESIZE_STEP as i16), editor);
+                Interaction::Consumed
+            }
+            (KeyCode::Char('L'), KeyModifiers::NONE) => {
+                self.resize_by(SIDEBAR_RESIZE_STEP as i16, editor);
                 Interaction::Consumed
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
@@ -638,6 +650,52 @@ impl FileTree {
         }
 
         Ok(())
+    }
+
+    fn width_for_available(&self, available_width: u16) -> u16 {
+        let desired = self
+            .preferred_width
+            .unwrap_or_else(|| Self::default_width(available_width));
+        Self::clamp_width(desired, available_width)
+    }
+
+    fn default_width(available_width: u16) -> u16 {
+        ((available_width as u32) * DEFAULT_SIDEBAR_WIDTH_PERCENT as u32 / 100) as u16
+    }
+
+    fn width_bounds(available_width: u16) -> (u16, u16) {
+        let min_width = MIN_SIDEBAR_WIDTH.min(available_width);
+        let max_width = available_width
+            .saturating_sub(MIN_EDITOR_WIDTH)
+            .clamp(min_width, MAX_SIDEBAR_WIDTH.min(available_width));
+
+        (min_width, max_width.max(min_width))
+    }
+
+    fn clamp_width(width: u16, available_width: u16) -> u16 {
+        let (min_width, max_width) = Self::width_bounds(available_width);
+        width.clamp(min_width, max_width)
+    }
+
+    fn resize_by(&mut self, delta: i16, editor: &mut Editor) {
+        let current = self.width_for_available(self.available_width);
+        let requested = (i32::from(current) + i32::from(delta)).max(0) as u16;
+        if self.set_width(requested) {
+            editor.set_status(format!(
+                "File explorer width: {}",
+                self.width_for_available(self.available_width)
+            ));
+        }
+    }
+
+    fn set_width(&mut self, requested: u16) -> bool {
+        let next = Self::clamp_width(requested, self.available_width);
+        if next == self.width_for_available(self.available_width) {
+            return false;
+        }
+
+        self.preferred_width = Some(next);
+        true
     }
 
     fn contains(&self, row: u16, column: u16) -> bool {
@@ -978,11 +1036,38 @@ fn read_directory_entries(root: &Path, editor: &Editor) -> io::Result<Vec<(PathB
     Ok(entries)
 }
 
+fn canonicalize_key(key: &mut KeyEvent) {
+    if let KeyEvent {
+        code: KeyCode::Char(_),
+        modifiers: _,
+    } = key
+    {
+        key.modifiers.remove(KeyModifiers::SHIFT)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_header, resolve_input_path, resolve_rename_destination};
-    use helix_view::graphics::{Modifier, Style};
-    use std::path::Path;
+    use super::{file_tree_header, resolve_input_path, resolve_rename_destination, FileTree};
+    use helix_view::graphics::{Modifier, Rect, Style};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
+
+    fn test_tree(available_width: u16) -> FileTree {
+        FileTree {
+            root: PathBuf::from("/tmp/workspace"),
+            expanded: HashSet::new(),
+            entries: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            focused: true,
+            area: Rect::default(),
+            preferred_width: None,
+            available_width,
+        }
+    }
 
     #[test]
     fn focused_header_splits_directory_and_basename() {
@@ -1029,5 +1114,21 @@ mod tests {
             err.to_string(),
             "rename expects a single file or directory name"
         );
+    }
+
+    #[test]
+    fn sidebar_width_defaults_to_ratio_within_bounds() {
+        let tree = test_tree(120);
+
+        assert_eq!(tree.width_for_available(120), 33);
+    }
+
+    #[test]
+    fn sidebar_width_restores_preferred_width_after_temporary_clamp() {
+        let mut tree = test_tree(120);
+
+        assert!(tree.set_width(34));
+        assert_eq!(tree.width_for_available(60), 20);
+        assert_eq!(tree.width_for_available(120), 34);
     }
 }

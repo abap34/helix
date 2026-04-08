@@ -208,13 +208,13 @@ impl EditorView {
         }
     }
 
-    fn split_content_area(&self, area: Rect, use_bufferline: bool) -> (Rect, Option<Rect>) {
+    fn split_content_area(&mut self, area: Rect, use_bufferline: bool) -> (Rect, Option<Rect>) {
         let mut content_area = area.clip_bottom(1);
         if use_bufferline {
             content_area = content_area.clip_top(1);
         }
 
-        let Some(file_tree) = &self.file_tree else {
+        let Some(file_tree) = &mut self.file_tree else {
             return (content_area, None);
         };
 

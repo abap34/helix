@@ -282,6 +282,8 @@ Note that the ignore files consulted by the file explorer when `ignore` is set t
 |`git-exclude` | Enables reading `.git/info/exclude` files | `false`
 |`flatten-dirs` | Enables flattening single child directories | `true`
 
+When the file explorer is focused, press `H` / `L` to shrink or grow it.
+
 ### `[editor.buffer-picker]` Section
 
 Set options for buffer picker.
