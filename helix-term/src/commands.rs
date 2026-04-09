@@ -3129,7 +3129,7 @@ fn file_explorer(cx: &mut Context) {
         return;
     }
 
-    toggle_file_tree(cx, root);
+    toggle_file_tree(cx, root, ui::FileTreeOpenMode::Workspace);
 }
 
 fn file_explorer_in_current_buffer_directory(cx: &mut Context) {
@@ -3154,7 +3154,7 @@ fn file_explorer_in_current_buffer_directory(cx: &mut Context) {
         }
     };
 
-    toggle_file_tree(cx, path);
+    toggle_file_tree(cx, path, ui::FileTreeOpenMode::CurrentBufferDirectory);
 }
 
 fn file_explorer_in_current_directory(cx: &mut Context) {
@@ -3165,17 +3165,17 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
         return;
     }
 
-    toggle_file_tree(cx, cwd);
+    toggle_file_tree(cx, cwd, ui::FileTreeOpenMode::CurrentDirectory);
 }
 
-fn toggle_file_tree(cx: &mut Context, root: PathBuf) {
+fn toggle_file_tree(cx: &mut Context, root: PathBuf, mode: ui::FileTreeOpenMode) {
     cx.callback.push(Box::new(move |compositor, cx| {
         let Some(editor_view) = compositor.find::<ui::EditorView>() else {
             cx.editor.set_error("editor view not found");
             return;
         };
 
-        if let Err(err) = editor_view.toggle_file_tree(root, cx.editor) {
+        if let Err(err) = editor_view.toggle_file_tree(root, mode, cx.editor) {
             cx.editor.set_error(err.to_string());
         }
     }));

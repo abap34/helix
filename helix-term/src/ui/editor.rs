@@ -37,7 +37,7 @@ use helix_view::{
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
 };
-use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
@@ -50,9 +50,25 @@ pub struct EditorView {
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
     file_tree: Option<FileTree>,
+    file_tree_mode: Option<FileTreeOpenMode>,
+    remembered_file_tree_roots: HashMap<FileTreeOpenMode, PathBuf>,
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FileTreeOpenMode {
+    Workspace,
+    CurrentBufferDirectory,
+    CurrentDirectory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileTreeToggleAction {
+    CloseExisting,
+    FocusExisting,
+    OpenRequested,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +91,8 @@ impl EditorView {
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
             file_tree: None,
+            file_tree_mode: None,
+            remembered_file_tree_roots: HashMap::new(),
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
         }
@@ -84,21 +102,48 @@ impl EditorView {
         &mut self.spinners
     }
 
-    pub fn toggle_file_tree(&mut self, root: PathBuf, editor: &mut Editor) -> std::io::Result<()> {
-        let root = helix_stdx::path::canonicalize(root);
+    pub fn toggle_file_tree(
+        &mut self,
+        root: PathBuf,
+        mode: FileTreeOpenMode,
+        editor: &mut Editor,
+    ) -> std::io::Result<()> {
+        let action = resolve_file_tree_toggle_action(
+            self.file_tree_mode,
+            self.file_tree
+                .as_ref()
+                .is_some_and(|file_tree| file_tree.is_focused()),
+            mode,
+        );
 
-        if let Some(file_tree) = &mut self.file_tree {
-            if file_tree.root() == root.as_path() {
-                if file_tree.is_focused() {
-                    self.file_tree = None;
-                } else {
+        if let Some(file_tree) = &self.file_tree {
+            if action != FileTreeToggleAction::OpenRequested {
+                self.remembered_file_tree_roots
+                    .insert(mode, file_tree.root().to_path_buf());
+            }
+        }
+
+        match action {
+            FileTreeToggleAction::CloseExisting => {
+                self.close_file_tree();
+                return Ok(());
+            }
+            FileTreeToggleAction::FocusExisting => {
+                if let Some(file_tree) = &mut self.file_tree {
                     file_tree.focus(editor)?;
                 }
                 return Ok(());
             }
+            FileTreeToggleAction::OpenRequested => {}
         }
 
+        let root = resolve_file_tree_root(
+            self.remembered_file_tree_roots.get(&mode),
+            helix_stdx::path::canonicalize(root),
+        );
+        self.remembered_file_tree_roots.insert(mode, root.clone());
         self.file_tree = Some(FileTree::new(root, editor)?);
+        self.file_tree_mode = Some(mode);
         Ok(())
     }
 
@@ -202,10 +247,20 @@ impl EditorView {
                 },
             )))),
             file_tree::Interaction::Close => {
-                self.file_tree = None;
+                self.close_file_tree();
                 Some(EventResult::Consumed(None))
             }
         }
+    }
+
+    fn close_file_tree(&mut self) {
+        if let (Some(file_tree), Some(mode)) = (&self.file_tree, self.file_tree_mode) {
+            self.remembered_file_tree_roots
+                .insert(mode, file_tree.root().to_path_buf());
+        }
+
+        self.file_tree = None;
+        self.file_tree_mode = None;
     }
 
     fn split_content_area(&mut self, area: Rect, use_bufferline: bool) -> (Rect, Option<Rect>) {
@@ -1354,6 +1409,90 @@ impl EditorView {
         commands::compute_inlay_hints_for_all_views(cx.editor, cx.jobs);
 
         EventResult::Ignored(None)
+    }
+}
+
+fn resolve_file_tree_toggle_action(
+    existing_mode: Option<FileTreeOpenMode>,
+    existing_is_focused: bool,
+    requested_mode: FileTreeOpenMode,
+) -> FileTreeToggleAction {
+    match existing_mode {
+        Some(mode) if mode == requested_mode && existing_is_focused => {
+            FileTreeToggleAction::CloseExisting
+        }
+        Some(mode) if mode == requested_mode => FileTreeToggleAction::FocusExisting,
+        _ => FileTreeToggleAction::OpenRequested,
+    }
+}
+
+fn resolve_file_tree_root(remembered_root: Option<&PathBuf>, requested_root: PathBuf) -> PathBuf {
+    remembered_root
+        .filter(|remembered_root| requested_root.starts_with(remembered_root.as_path()))
+        .cloned()
+        .unwrap_or(requested_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        resolve_file_tree_root, resolve_file_tree_toggle_action, FileTreeOpenMode,
+        FileTreeToggleAction,
+    };
+    use std::{collections::HashMap, path::PathBuf};
+
+    #[test]
+    fn same_mode_toggle_closes_focused_tree() {
+        let action = resolve_file_tree_toggle_action(
+            Some(FileTreeOpenMode::CurrentBufferDirectory),
+            true,
+            FileTreeOpenMode::CurrentBufferDirectory,
+        );
+
+        assert_eq!(action, FileTreeToggleAction::CloseExisting);
+    }
+
+    #[test]
+    fn same_mode_toggle_refocuses_hidden_tree() {
+        let action = resolve_file_tree_toggle_action(
+            Some(FileTreeOpenMode::CurrentBufferDirectory),
+            false,
+            FileTreeOpenMode::CurrentBufferDirectory,
+        );
+
+        assert_eq!(action, FileTreeToggleAction::FocusExisting);
+    }
+
+    #[test]
+    fn reused_root_keeps_original_hierarchy_for_nested_buffer_directory() {
+        let mut remembered_roots = HashMap::new();
+        remembered_roots.insert(
+            FileTreeOpenMode::CurrentBufferDirectory,
+            PathBuf::from("/workspace"),
+        );
+
+        let resolved = resolve_file_tree_root(
+            remembered_roots.get(&FileTreeOpenMode::CurrentBufferDirectory),
+            PathBuf::from("/workspace/src/nested"),
+        );
+
+        assert_eq!(resolved, PathBuf::from("/workspace"));
+    }
+
+    #[test]
+    fn unrelated_requested_root_replaces_previous_hierarchy() {
+        let mut remembered_roots = HashMap::new();
+        remembered_roots.insert(
+            FileTreeOpenMode::CurrentBufferDirectory,
+            PathBuf::from("/workspace"),
+        );
+
+        let resolved = resolve_file_tree_root(
+            remembered_roots.get(&FileTreeOpenMode::CurrentBufferDirectory),
+            PathBuf::from("/other-workspace/src"),
+        );
+
+        assert_eq!(resolved, PathBuf::from("/other-workspace/src"));
     }
 }
 
